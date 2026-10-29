@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.tsbuildinfo
+/apps/web/vite.config.js
+/apps/web/vite.config.d.ts
+/AZURE_ACCOUNT_REFERENCE.md
