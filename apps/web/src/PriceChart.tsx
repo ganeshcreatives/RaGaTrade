@@ -4,6 +4,7 @@ type Candle = { time: string; close: number };
 const money = (value: number) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2 }).format(value);
 
 export default function PriceChart({ chart }: { chart: Candle[] }) {
+  if (!chart.length) return <div className="chart-wrap inline-empty">No verified price history is available. Connect Dhan and import one-minute candles.</div>;
   return <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chart} margin={{ top: 8, right: 5, left: 0, bottom: 0 }}>
     <defs><linearGradient id="price-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#23876d" stopOpacity={.16}/><stop offset="100%" stopColor="#23876d" stopOpacity={0}/></linearGradient></defs>
     <CartesianGrid stroke="#edf0f3" vertical={false}/>
