@@ -1,4 +1,5 @@
 const { Client } = require("pg");
+let stage = "connect";
 
 async function main() {
   const adminUrl = process.env.ADMIN_DATABASE_URL;
@@ -8,8 +9,10 @@ async function main() {
 
   const client = new Client({ connectionString: adminUrl });
   await client.connect();
+  stage = "create-extension";
   try {
     await client.query("CREATE EXTENSION IF NOT EXISTS pgcrypto");
+    stage = "create-role";
     const existing = await client.query("SELECT 1 FROM pg_roles WHERE rolname = $1", ["marketpilot_app"]);
     const passwordLiteral = `'${appPassword.replace(/'/g, "''")}'`;
     if (existing.rowCount) {
@@ -17,9 +20,11 @@ async function main() {
     } else {
       await client.query(`CREATE ROLE marketpilot_app LOGIN PASSWORD ${passwordLiteral}`);
     }
+    stage = "grant-connect";
     await client.query("GRANT CONNECT ON DATABASE trading TO marketpilot_app");
-    await client.query("ALTER DATABASE trading OWNER TO marketpilot_app");
-    await client.query("ALTER SCHEMA public OWNER TO marketpilot_app");
+    stage = "grant-schema";
+    await client.query("GRANT USAGE, CREATE ON SCHEMA public TO marketpilot_app");
+    stage = "grant-existing-objects";
     await client.query("GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO marketpilot_app");
     await client.query("GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO marketpilot_app");
     console.log("database-role-ready");
@@ -29,6 +34,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("database-role-bootstrap-failed", error.code || error.name || "unknown");
+  console.error("database-role-bootstrap-failed", stage, error.code || error.name || "unknown");
   process.exitCode = 1;
 });
