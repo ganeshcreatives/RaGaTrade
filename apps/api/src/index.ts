@@ -56,7 +56,6 @@ app.use(helmet()); app.use(cors({ origin: process.env.WEB_ORIGIN ?? "http://loca
 app.use((req, res, next) => { res.setHeader("Cache-Control", "no-store"); res.setHeader("X-Content-Type-Options", "nosniff"); next(); });
 
 const DDL = `
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE TABLE IF NOT EXISTS users(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),email text NOT NULL UNIQUE,password_hash text NOT NULL,display_name text NOT NULL,role text NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin')),created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS sessions(id uuid PRIMARY KEY,user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,expires_at timestamptz NOT NULL,revoked_at timestamptz,created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS identities(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,provider text NOT NULL,provider_subject text NOT NULL,created_at timestamptz NOT NULL DEFAULT now(),UNIQUE(provider,provider_subject));

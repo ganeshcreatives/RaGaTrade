@@ -9,9 +9,7 @@ async function main() {
 
   const client = new Client({ connectionString: adminUrl });
   await client.connect();
-  stage = "create-extension";
   try {
-    await client.query("CREATE EXTENSION IF NOT EXISTS pgcrypto");
     stage = "create-role";
     const existing = await client.query("SELECT 1 FROM pg_roles WHERE rolname = $1", ["marketpilot_app"]);
     const passwordLiteral = `'${appPassword.replace(/'/g, "''")}'`;
