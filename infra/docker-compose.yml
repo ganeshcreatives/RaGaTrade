@@ -53,12 +53,16 @@ services:
       context: ..
       dockerfile: infra/docker/web.Dockerfile
     ports: ["5173:80"]
+    environment:
+      API_INTERNAL_HOST: api
     depends_on: [api]
   ml-service:
     build:
       context: ..
       dockerfile: infra/docker/ml.Dockerfile
     ports: ["8000:8000"]
+    volumes:
+      - ../models:/models:ro
   market-worker:
     build:
       context: ..

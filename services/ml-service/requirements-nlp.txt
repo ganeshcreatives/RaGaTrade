@@ -1,0 +1,5 @@
+# Optional CPU-only event text classification. Large model weights must be
+# reviewed/licensed and mounted locally; this file never fetches model weights.
+torch>=2.6,<3
+transformers>=4.52,<5
+safetensors>=0.5,<1
