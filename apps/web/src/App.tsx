@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { Activity, ArrowDownRight, ArrowUpRight, Bell, BellRing, BookOpen, BriefcaseBusiness, ChevronDown, CircleHelp, Globe2, LayoutDashboard, LogOut, Menu, MoreHorizontal, Plus, Search, ShieldCheck, Sparkles, Star, TrendingUp, Wallet, Wifi, X, RefreshCw, SlidersHorizontal, ChartNoAxesCombined } from "lucide-react";
 
-const API = (import.meta as any).env.VITE_API_URL;
+const API = (import.meta as any).env.VITE_API_URL ?? "";
 const LazyPriceChart = lazy(() => import("./PriceChart"));
 type Instrument = { id: string; symbol: string; name: string; exchange: string; sector: string; price: number | null; change: number | null; volume: string; kind: string; source?: string; asOf?: string };
 type User = { id: string; email: string; name: string; role: string };
@@ -9,7 +9,7 @@ const money = (n: number | null | undefined) => n == null || !Number.isFinite(Nu
 const pct = (n: number | null | undefined) => n == null || !Number.isFinite(Number(n)) ? "—" : `${n > 0 ? "+" : ""}${n.toFixed(2)}%`;
 const indiaDateTime = (date: Date) => new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(date).replace("T", " ");
 const nav = [["Overview", LayoutDashboard], ["Markets", TrendingUp], ["Watchlist", Star], ["Paper portfolio", BriefcaseBusiness], ["Price alerts", BellRing], ["Backtesting", ChartNoAxesCombined], ["AI research", Sparkles], ["Global events", Globe2], ["Broker setup", Wifi]] as const;
-async function api(path: string, init: RequestInit = {}) { const r = await fetch(`${API}${path}`, { ...init, credentials: "include", headers: { "Content-Type": "application/json", ...(init.headers ?? {}) } }); const data = r.status === 204 ? null : await r.json().catch(() => null); if (!r.ok) throw new Error(data?.error ?? `Request failed (${r.status})`); return data; }
+async function api(path: string, init: RequestInit = {}) { const r = await fetch(`${API}${path}`, { ...init, signal: init.signal ?? AbortSignal.timeout(path.endsWith("/history/import") ? 120000 : 30000), credentials: "include", headers: { "Content-Type": "application/json", ...(init.headers ?? {}) } }); const data = r.status === 204 ? null : await r.json().catch(() => null); if (!r.ok) throw new Error(data?.error ?? `Request failed (${r.status})`); return data; }
 
 export default function App() {
   const [tab, setTab] = useState("Overview"), [user, setUser] = useState<User | null>(null), [authMode, setAuthMode] = useState<"login" | "register" | null>(null);
@@ -22,12 +22,21 @@ export default function App() {
 
   const loadBase = useCallback(async () => { const [ov, ins, ev] = await Promise.all([api("/api/v1/overview"), api("/api/v1/instruments"), api("/api/v1/global/events")]); setOverview(ov); setInstruments(ins); setEvents(ev); }, []);
   const loadPrivate = useCallback(async () => { if (!user) { setAccount(null); setWatchlist([]); return; } const [a, w, l, p] = await Promise.all([api("/api/v1/paper/account"), api("/api/v1/watchlist"), api("/api/v1/paper/ledger"), api("/api/v1/risk/policy")]); setAccount(a); setWatchlist(w); setLedger(l); setPolicy(p); }, [user]);
-  useEffect(() => { void (async () => { try { await loadBase(); const session = await api("/api/v1/auth/me"); setUser(session.user); } catch (e) { if (!(e instanceof Error && e.message === "Sign in required")) { setPreviewMode(true);setOverview({market:{name:"NIFTY 50",value:null,change:null,source:"UNAVAILABLE"},breadth:null,feed:{status:"OFFLINE",label:"API unavailable · no market values loaded"},events:[],instruments:[]});setInstruments([]);setEvents([]);setNotice("Offline: API and PostgreSQL are unavailable. No sample market values are shown."); } } finally { setBooting(false); } })(); }, [loadBase]);
+  useEffect(() => {
+    let active = true;
+    void loadBase().then(() => { if (active) setPreviewMode(false); }).catch(() => {
+      if (!active) return;
+      setPreviewMode(true);
+      setNotice("Market data could not load. Use Refresh to retry; Azure may be waking up.");
+    }).finally(() => { if (active) setBooting(false); });
+    void api("/api/v1/auth/me").then(session => { if (active) setUser(session.user); }).catch(() => {});
+    return () => { active = false; };
+  }, [loadBase]);
   useEffect(() => { if (user) void loadPrivate().catch(e => setNotice(e.message)); }, [user, loadPrivate]);
   useEffect(() => { if(new URLSearchParams(window.location.search).get("dhan")==="connected"){setTab("Broker setup");setNotice("Dhan connected. Market data will update when the market-data API is available.");window.history.replaceState({},"",window.location.pathname);} }, []);
   const item = instruments.find(i => i.id === selected) || instruments.find(i => i.kind !== "index");
   useEffect(() => { if (!item) {setChart([]);setChartSource("UNAVAILABLE");return;}if(previewMode){setChart([]);setChartSource("UNAVAILABLE");setInsight({probabilityUp:null,expectedReturnBps:null,predictionIntervalBps:null,modelVersion:null,modelStatus:"unavailable",reason:"API is unavailable. No market inputs were loaded or scored."});return;}void Promise.all([api(`/api/v1/market/${item.id}/candles`), api(`/api/v1/insights/${item.id}`)]).then(([c, p]) => { setChart(c.candles);setChartSource(c.source); setInsight(p); }).catch(() => {}); }, [item?.id,previewMode]);
-  const refresh = async () => { setLoading(true); try { await loadBase(); await loadPrivate(); setNotice("Data refreshed."); } catch (e) { setNotice(e instanceof Error ? e.message : "Refresh failed"); } finally { setLoading(false); } };
+  const refresh = async () => { setLoading(true); try { await loadBase(); setPreviewMode(false); await loadPrivate(); setNotice("Data refreshed."); } catch (e) { setNotice(e instanceof Error ? e.message : "Refresh failed"); } finally { setLoading(false); } };
   const importHistory = async () => { if(!item||!user){setHistoryMsg("Sign in and connect Dhan before importing history.");return;}setHistorySync(true);setHistoryMsg("");try{const to=new Date(),from=new Date(to.getTime()-historyDays*24*60*60*1000);const result=await api(`/api/v1/market/${item.id}/history/import`,{method:"POST",body:JSON.stringify({fromDate:indiaDateTime(from),toDate:indiaDateTime(to)})});const saved=await api(`/api/v1/market/${item.id}/candles`);setChart(saved.candles);setChartSource(saved.source);setHistoryMsg(`${result.stored} validated one-minute bars stored for ${result.symbol}; ${result.rejected} invalid rows rejected.`);}catch(e){setHistoryMsg(e instanceof Error?e.message:"Historical import failed.");}finally{setHistorySync(false);} };
   const downloadBars = () => {const to=new Date(),from=new Date(to.getTime()-historyDays*24*60*60*1000);window.location.assign(`${API}/api/v1/research/bars/export?fromDate=${encodeURIComponent(indiaDateTime(from))}&toDate=${encodeURIComponent(indiaDateTime(to))}`);};
   const filtered = useMemo(() => instruments.filter(i => i.kind !== "index" && (!search || `${i.symbol} ${i.name} ${i.sector}`.toLowerCase().includes(search.toLowerCase())) && (sector === "All sectors" || i.sector === sector)), [instruments, search, sector]);
@@ -38,7 +47,7 @@ export default function App() {
   const toggleWatch = async (id: string) => { if (!user) { setAuthMode("login"); return; } const exists = watchlist.some(x => x.id === id); try { if (exists) await api(`/api/v1/watchlist/${id}`, { method: "DELETE" }); else await api(`/api/v1/watchlist/${id}`, { method: "POST", body: "{}" }); await loadPrivate(); } catch (e) { setNotice(e instanceof Error ? e.message : "Watchlist update failed"); } };
   const openAdmin = async () => { try { setAdmin(await api("/api/v1/admin/health")); setTab("Operations"); } catch (e) { setNotice(e instanceof Error ? e.message : "Admin access unavailable"); } };
 
-  if (booting) return <div className="boot-screen"><Activity /><p>Connecting to MarketPilot services…</p></div>;
+
   return <div className="app">
     <aside className="sidebar"><a className="brand" href="#" onClick={e => { e.preventDefault(); setTab("Overview"); }}><span className="brand-icon"><Activity size={18} /></span><span>market<span className="brand-light">pilot</span><small>RESEARCH TERMINAL</small></span></a>
       <div className="workspace"><div className="avatar">{user?.name?.slice(0, 1).toUpperCase() ?? "G"}</div><div><b>{user ? `${user.name}’s workspace` : "Guest workspace"}</b><small>{user?.email ?? "Public research"}</small></div><ChevronDown size={15} /></div><div className="nav-label">WORKSPACE</div>
@@ -47,7 +56,7 @@ export default function App() {
     </aside>
     <main className="main"><header className="topbar"><button className="mobile-menu"><Menu /></button><div className="crumb">Workspace <span>/</span> <b>{tab}</b></div><div className="top-actions"><div className="search-global"><Search size={16} /><input placeholder="Search stocks, insights…" value={search} onChange={e => { setSearch(e.target.value); if (tab !== "Markets") setTab("Markets"); }} /><kbd>⌘ K</kbd></div><button className="icon-btn" aria-label="Notifications" onClick={() => setNotice("No notifications yet.")}><Bell size={18} /></button><button className="icon-btn" aria-label="Refresh data" onClick={() => void refresh()}><RefreshCw size={17} /></button><div className="top-avatar">{user?.name?.slice(0, 1).toUpperCase() ?? "G"}</div></div></header>
       <div className="content"><div className="greeting"><div><div className="eyebrow">INDIAN MARKETS <span className="live-dot" /> {overview?.feed?.status === "LIVE" ? "DHAN DATA CONNECTED" : "NO LIVE FEED"}</div><h1>{pageTitle(tab)}</h1><p className="subtitle">Research and practice workspace · Prices show their source and freshness</p></div><div className="greeting-actions"><span className="data-tag"><span /> {overview?.feed?.status === "LIVE" ? "DHAN MARKET DATA" : "NO LIVE DATA"}</span>{user ? <>{user.role === "admin" && <button className="outline-btn" onClick={() => void openAdmin()}>Operations</button>}<button className="outline-btn" onClick={() => void refresh()}><RefreshCw size={14} /> {loading ? "Refreshing" : "Refresh"}</button></> : <button className="buy-btn" onClick={() => setAuthMode("register")}>Create paper account</button>}</div></div>
-        {notice && <div className="notice"><span>{notice}</span><button onClick={() => setNotice("")} aria-label="Dismiss"><X size={15} /></button></div>}
+        {booting && <div className="notice" role="status">Loading market data… You can sign in or open Broker setup while services connect.</div>}{notice && <div className="notice"><span>{notice}</span><button onClick={() => setNotice("")} aria-label="Dismiss"><X size={15} /></button></div>}
         {tab === "Overview" && <Overview overview={overview} items={filtered} item={item} chart={chart} chartSource={chartSource} insight={insight} account={account} user={user} onSelect={setSelected} onTab={setTab} onOrder={placeOrder} loading={loading} />}
         {tab === "Markets" && <Markets items={filtered} sectors={sectors} sector={sector} setSector={setSector} selected={item} watchlist={watchlist} onSelect={setSelected} onWatch={toggleWatch} onOrder={placeOrder} onSide={setOrderSide} onQty={setOrderQty} quantity={orderQty} side={orderSide} loading={loading} chart={chart} chartSource={chartSource} insight={insight} />}
         {tab === "Watchlist" && <Watchlist items={watchlist} onSelect={setSelected} onRemove={toggleWatch} onMarkets={() => setTab("Markets")} />}
