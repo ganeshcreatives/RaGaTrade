@@ -11,6 +11,7 @@ import { createClient } from "redis";
 import { OAuth2Client } from "google-auth-library";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { z } from "zod";
 
 const { Pool } = pg;
@@ -194,6 +195,9 @@ app.post("/api/v1/research/backtests",auth,async(req:AuthedRequest,res,next)=>{t
 app.get("/api/v1/live/status",(_req,res)=>res.json({enabled:false,mode:"DISABLED",message:"Live execution is not implemented and is hard-disabled."}));
 app.post("/api/v1/live/order-intents",(_req,res)=>res.status(403).json({error:"Live execution is not implemented",code:"LIVE_TRADING_DISABLED"}));
 app.get("/api/v1/admin/health",auth,async(req:AuthedRequest,res,next)=>{try{const u=await pool.query("SELECT role FROM users WHERE id=$1",[req.userId]);if(u.rows[0]?.role!=="admin")return res.status(403).json({error:"Administrator role required"});const db=await pool.query("SELECT (SELECT count(*) FROM users)::int AS users,(SELECT count(*) FROM paper_orders)::int AS orders,(SELECT count(*) FROM audit_events)::int AS audit_events");res.json({status:"ok",database:"connected",feed:"DEMO_DATA",liveTrading:"DISABLED",counts:db.rows[0]});}catch(e){next(e);}});
+const webDistPath=path.resolve(process.env.WEB_DIST_PATH??"apps/web/dist");
+app.use(express.static(webDistPath,{index:false,immutable:true,maxAge:"1y",setHeaders:(res,filePath)=>{if(filePath.endsWith("index.html"))res.setHeader("Cache-Control","no-cache");}}));
+app.get("*",(req,res,next)=>{if(req.path.startsWith("/api/"))return next();res.sendFile(path.join(webDistPath,"index.html"),error=>{if(error)next(error);});});
 app.use((err:unknown,_req:Request,res:Response,_next:NextFunction)=>{console.error(err);res.status(500).json({error:"Internal server error"});});
 let server:ReturnType<typeof app.listen>|undefined;
 void initialize().then(()=>{server=app.listen(port,()=>console.log(`API ready on http://localhost:${port}; Postgres connected; paper mode`));setInterval(()=>void pollDhanQuotes(),5000).unref();}).catch(error=>{console.error("Database initialization failed",error);process.exit(1);});
