@@ -1,3 +1,4 @@
+import { syncNseMaster } from "./instrument-master.js";
 import dotenv from "dotenv";
 dotenv.config({ path: process.env.ENV_FILE ?? "../../.env" });
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -175,7 +176,39 @@ app.post("/api/v1/watchlist/:instrumentId",auth,async(req:AuthedRequest,res,next
 app.delete("/api/v1/watchlist/:instrumentId",auth,async(req:AuthedRequest,res,next)=>{try{await pool.query("DELETE FROM watchlist_items WHERE user_id=$1 AND instrument_id=$2",[req.userId,req.params.instrumentId]);res.status(204).end();}catch(e){next(e);}});
 function quote(id:string){return instruments.find(i=>i.id===id)??null;}
 async function withLatestQuote(i:any){try{let live=inMemoryQuotes.get(i.symbol);if(redisClient?.isReady){const raw=await redisClient.get(`quote:${i.symbol}`);if(raw)live=JSON.parse(raw);}if(live&&Date.now()-Date.parse(live.timestamp)<30000)return{...i,price:Number(live.price),change:Number(live.change??0),asOf:live.timestamp,source:"DHAN_API"};}catch{}return{...i,price:null,change:null,volume:"—",asOf:null,source:"UNAVAILABLE"};}
-async function pollDhanQuotes(){try{const connections=await pool.query("SELECT * FROM dhan_connections WHERE expires_at IS NULL OR expires_at>now()");for(const row of connections.rows){const token=decryptDhanToken(row),symbols=instruments.filter(i=>dhanScrips[i.symbol]),ids=symbols.map(i=>Number(dhanScrips[i.symbol]));const response=await fetch("https://api.dhan.co/v2/marketfeed/ohlc",{method:"POST",headers:{"access-token":token,"client-id":dhanClientId,"Content-Type":"application/json",accept:"application/json"},body:JSON.stringify({NSE_EQ:ids})});if(!response.ok)continue;const body:any=await response.json();for(const i of symbols){const q=body?.data?.NSE_EQ?.[dhanScrips[i.symbol]]??body?.NSE_EQ?.[dhanScrips[i.symbol]];const price=Number(q?.last_price??q?.ltp),previous=Number(q?.ohlc?.close);if(!Number.isFinite(price)||price<=0)continue;const snapshot={symbol:i.symbol,price,change:previous>0?(price-previous)/previous*100:0,timestamp:new Date().toISOString(),source:"DHAN_API" as const};inMemoryQuotes.set(i.symbol,snapshot);if(redisClient?.isReady)await redisClient.set(`quote:${i.symbol}`,JSON.stringify(snapshot),{EX:30});}}}catch(error){console.warn("Dhan quote poll failed:",(error as Error).message);}}
+let pollingDhan=false;
+async function pollDhanQuotes(){
+ if(pollingDhan)return; pollingDhan=true;
+ try{
+  const connection=await pool.query("SELECT * FROM dhan_connections WHERE expires_at>now() ORDER BY connected_at DESC LIMIT 1");
+  if(!connection.rowCount)return;
+  const token=decryptDhanToken(connection.rows[0]),symbols=instruments.filter(i=>dhanScrips[i.symbol]);
+  for(let offset=0;offset<symbols.length;offset+=1000){
+   const batch=symbols.slice(offset,offset+1000);
+   const response=await fetch("https://api.dhan.co/v2/marketfeed/ohlc",{method:"POST",headers:{"access-token":token,"client-id":dhanClientId,"Content-Type":"application/json"},body:JSON.stringify({NSE_EQ:batch.map(i=>Number(dhanScrips[i.symbol]))}),signal:AbortSignal.timeout(10000)});
+   if(!response.ok)break;
+   const body:any=await response.json();
+   for(const i of batch){
+    const q=body?.data?.NSE_EQ?.[dhanScrips[i.symbol]],price=Number(q?.last_price),previous=Number(q?.ohlc?.close);
+    if(!Number.isFinite(price)||price<=0)continue;
+    const snapshot={price,change:previous>0?(price-previous)/previous*100:0,timestamp:new Date().toISOString(),source:"DHAN_API" as const};
+    inMemoryQuotes.set(i.symbol,snapshot);
+    if(redisClient?.isReady)await redisClient.set(`quote:${i.symbol}`,JSON.stringify(snapshot),{EX:30});
+   }
+   if(offset+1000<symbols.length)await new Promise(resolve=>setTimeout(resolve,1100));
+  }
+ }catch(error){console.warn("Dhan quote poll failed:",(error as Error).message);}finally{pollingDhan=false;}
+}
+async function loadInstrumentCatalogue(){
+ const stored=await pool.query("SELECT i.id,i.symbol,i.name,i.exchange,i.sector,d.security_id FROM instruments i JOIN dhan_instruments d ON d.instrument_id=i.id WHERE i.active=true AND d.exchange_segment='NSE_EQ' ORDER BY i.symbol");
+ if(!stored.rowCount)return;
+ const index=instruments.find(i=>i.kind==="index")!;
+ instruments.splice(0,instruments.length,index,...stored.rows.map(r=>({id:r.id,symbol:r.symbol,name:r.name,exchange:r.exchange,sector:r.sector,kind:"equity"})));
+ for(const key of Object.keys(dhanScrips))delete dhanScrips[key];
+ for(const row of stored.rows)dhanScrips[row.symbol]=row.security_id;
+}
+async function refreshInstrumentCatalogue(){try{const count=await syncNseMaster(pool);await loadInstrumentCatalogue();console.log(`Dhan NSE equity catalogue synced: ${count}`);}catch(error){console.warn("Instrument sync failed:",(error as Error).message);}}
+
 async function accountFor(userId:string){return pool.query("SELECT * FROM paper_accounts WHERE user_id=$1",[userId]);}
 app.get("/api/v1/paper/account",auth,async(req:AuthedRequest,res,next)=>{try{const ar=await accountFor(req.userId!);if(!ar.rowCount)return res.status(404).json({error:"Paper account not found"});const a=ar.rows[0];const pr=await pool.query("SELECT p.instrument_id,p.quantity,p.avg_price,i.symbol,i.name FROM paper_positions p JOIN instruments i ON i.id=p.instrument_id WHERE p.account_id=$1 ORDER BY i.symbol",[a.id]);const positions=await Promise.all(pr.rows.map(async p=>{const q=await withLatestQuote(quote(p.instrument_id)!);const qty=Number(p.quantity),avg=Number(p.avg_price),fresh=q.source==="DHAN_API"&&Number.isFinite(Number(q.price)),value=fresh?qty*Number(q.price):null;return{instrumentId:p.instrument_id,symbol:p.symbol,name:p.name,quantity:qty,avgPrice:avg,lastPrice:fresh?Number(q.price):null,marketValue:value,unrealizedPnl:fresh?(Number(q.price)-avg)*qty:null,markSource:fresh?"DHAN_API":"UNAVAILABLE"};}));const orders=await pool.query("SELECT o.*,i.symbol FROM paper_orders o JOIN instruments i ON i.id=o.instrument_id WHERE o.account_id=$1 ORDER BY o.created_at DESC LIMIT 100",[a.id]);const allPositionsMarked=positions.every(p=>p.marketValue!==null),equity=allPositionsMarked?Number(a.cash)+positions.reduce((s,p)=>s+Number(p.marketValue),0):null;res.json({id:a.id,name:a.name,cash:Number(a.cash),startingCash:Number(a.starting_cash),equity,dayPnl:equity===null?null:equity-Number(a.starting_cash),positions,orders:orders.rows});}catch(e){next(e);}});
 const orderSchema=z.object({instrumentId:z.string(),clientOrderId:z.string().uuid().optional(),side:z.enum(["BUY","SELL"]),quantity:z.number().int().min(1).max(10000),type:z.enum(["MARKET","LIMIT"]).default("MARKET"),limitPrice:z.number().positive().optional()});
@@ -198,6 +231,6 @@ app.use(express.static(webDistPath,{index:false,immutable:true,maxAge:"1y",setHe
 app.get("*",(req,res,next)=>{if(req.path.startsWith("/api/"))return next();res.sendFile(path.join(webDistPath,"index.html"),error=>{if(error)next(error);});});
 app.use((err:unknown,_req:Request,res:Response,_next:NextFunction)=>{console.error(err);res.status(500).json({error:"Internal server error"});});
 let server:ReturnType<typeof app.listen>|undefined;
-void initialize().then(()=>{server=app.listen(port,()=>console.log(`API ready on http://localhost:${port}; Postgres connected; paper mode`));setInterval(()=>void pollDhanQuotes(),5000).unref();}).catch(error=>{console.error("Database initialization failed",error);process.exit(1);});
+void initialize().then(async()=>{await loadInstrumentCatalogue();void refreshInstrumentCatalogue();setInterval(()=>void refreshInstrumentCatalogue(),24*60*60*1000).unref();server=app.listen(port,()=>console.log(`API ready on http://localhost:${port}; Postgres connected; paper mode`));setInterval(()=>void pollDhanQuotes(),5000).unref();}).catch(error=>{console.error("Database initialization failed",error);process.exit(1);});
 process.on("SIGTERM",()=>{server?.close();void pool.end();void redisClient?.quit().catch(()=>{});});
 
