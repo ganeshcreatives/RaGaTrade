@@ -7,6 +7,8 @@ artifact is installed or the input market data is stale.
 from __future__ import annotations
 
 import json
+import hashlib
+import io
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,7 +18,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
-from pydantic import AnyHttpUrl, BaseModel, Field, field_validator
+from pydantic import AnyHttpUrl, AwareDatetime, BaseModel, Field, field_validator
 
 from features import FEATURE_ORDER, build_features
 
@@ -31,13 +33,13 @@ class PredictRequest(BaseModel):
     symbol: str = Field(min_length=1, max_length=32)
     horizon_minutes: int = Field(default=15, ge=5, le=30)
     data_freshness_ms: int = Field(ge=0)
-    data_as_of: datetime
+    data_as_of: AwareDatetime
     features: dict[str, float] = Field(default_factory=dict)
     source: str = Field(default="UNKNOWN", max_length=40)
 
 
 class BarInput(BaseModel):
-    timestamp: datetime
+    timestamp: AwareDatetime
     open: float = Field(gt=0)
     high: float = Field(gt=0)
     low: float = Field(gt=0)
@@ -74,7 +76,17 @@ def status() -> dict[str, Any]:
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {"status": "unavailable", "modelVersion": None, "source": "INVALID_MANIFEST", "action": "NO_TRADE"}
-    return {"status": "ready", **manifest}
+    if not isinstance(manifest, dict):
+        return {"status": "unavailable", "source": "INVALID_MANIFEST", "action": "NO_TRADE"}
+    if manifest.get("approval") != "HUMAN_APPROVED" or not manifest.get("reviewer") or not manifest.get("approvalNote"):
+        return {"status": "unavailable", "source": "UNAPPROVED_MODEL", "action": "NO_TRADE"}
+    try:
+        valid_hash = hashlib.sha256(ARTIFACT.read_bytes()).hexdigest() == manifest.get("artifactSha256")
+    except OSError:
+        valid_hash = False
+    if not valid_hash or manifest.get("featureOrder") != FEATURE_ORDER:
+        return {"status": "unavailable", "source": "INVALID_ARTIFACT", "action": "NO_TRADE"}
+    return {**manifest, "status": "ready"}
 
 
 @app.get("/health")
@@ -121,6 +133,8 @@ def classify_event(body: EventRequest) -> dict[str, Any]:
 @app.post("/internal/ml/predict")
 def predict(body: PredictRequest) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
+    if body.data_as_of > now:
+        raise HTTPException(status_code=422, detail="Market timestamp must not be in the future")
     computed_freshness_ms = max(0, int((now - body.data_as_of.astimezone(timezone.utc)).total_seconds() * 1000))
     data_freshness_ms = max(body.data_freshness_ms, computed_freshness_ms)
     as_of = body.data_as_of.astimezone(timezone.utc).isoformat()
@@ -152,7 +166,10 @@ def predict(body: PredictRequest) -> dict[str, Any]:
                 "modelVersion": current.get("modelVersion"), "modelStatus": "ready", "action": "NO_TRADE",
                 "reason": "The active artifact was trained for a different forecast horizon.", "source": body.source}
     try:
-        artifact = joblib.load(ARTIFACT)
+        artifact_bytes = ARTIFACT.read_bytes()
+        if hashlib.sha256(artifact_bytes).hexdigest() != current.get("artifactSha256"):
+            raise ValueError("Model changed during inference; retry after promotion completes")
+        artifact = joblib.load(io.BytesIO(artifact_bytes))
         feature_order = current["featureOrder"]
         row = np.asarray([[float(body.features[name]) for name in feature_order]], dtype=np.float64)
         if not np.isfinite(row).all():
@@ -160,11 +177,13 @@ def predict(body: PredictRequest) -> dict[str, Any]:
         probability = float(artifact["classifier"].predict_proba(row)[0, 1])
         expected_bps = float(artifact["regressor"].predict(row)[0])
         low, high = current["metrics"]["predictionIntervalBps"]
+        if not np.isfinite([probability, expected_bps, low, high]).all() or not 0 <= probability <= 1 or low > high:
+            raise ValueError("Invalid model output")
         volatility = float(body.features.get("volatility_20", 0.0))
         regime = "high_volatility" if volatility >= current["metrics"].get("highVolatilityThreshold", 0.025) else "normal"
-        return {"symbol": body.symbol.upper(), "asOf": now, "horizonMinutes": body.horizon_minutes,
+        return {"symbol": body.symbol.upper(), "asOf": as_of, "horizonMinutes": body.horizon_minutes,
                 "probabilityUp": round(probability, 4), "expectedReturnBps": round(expected_bps, 2),
-                "predictionIntervalBps": [low, high], "marketRegime": regime,
+                "predictionIntervalBps": [round(expected_bps + low, 2), round(expected_bps + high, 2)], "marketRegime": regime,
                 "dataFreshnessMs": data_freshness_ms, "modelVersion": current["modelVersion"],
                 "modelStatus": "ready", "action": "NO_TRADE",
                 "reason": "Research estimate only. Automated trade decisions are disabled; validate uncertainty and costs independently.",

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import shutil
 from pathlib import Path
 
@@ -28,6 +29,10 @@ def main() -> None:
         parser.error("candidate artifact and matching JSON manifest must both exist")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     metrics = manifest.get("metrics", {})
+    required_metrics = ("validationRows", "walkForwardFolds", "brierScore", "momentumBaselineBrier",
+                        "logisticChallengerBrier", "calibrationError10Bins")
+    if any(not isinstance(metrics.get(key), (int, float)) or not math.isfinite(metrics[key]) for key in required_metrics):
+        parser.error("promotion metrics must be present and finite")
     if sha256(args.candidate) != manifest.get("artifactSha256"):
         parser.error("candidate artifact SHA-256 does not match the manifest")
     if manifest.get("approval") != "CANDIDATE_NOT_PROMOTED":

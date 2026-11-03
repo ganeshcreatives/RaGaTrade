@@ -37,17 +37,25 @@ def walk_forward_splits(frame: pd.DataFrame, horizon: int, folds: int = 4):
         if not len(validation_dates):
             continue
         validation_start = validation_dates[0]
-        first_symbol_bars = frame.loc[frame.timestamp < validation_start].groupby("symbol").timestamp.nunique()
         # Time embargo based on the interval of observed bars; it scales across
         # trading calendars without converting Indian market time assumptions.
         cadence = frame.groupby("symbol").timestamp.diff().dropna().median()
         if pd.isna(cadence) or cadence <= pd.Timedelta(0):
             raise ValueError("Cannot infer bar cadence for purging overlapping labels")
         embargo_start = validation_start - cadence * horizon
-        train_mask = (frame.timestamp < embargo_start)
+        train_mask = (frame.timestamp < embargo_start) & (frame.label_end < validation_start)
         valid_mask = frame.timestamp.isin(validation_dates)
         if train_mask.sum() >= 100 and valid_mask.sum() >= 30:
             yield np.flatnonzero(train_mask.to_numpy()), np.flatnonzero(valid_mask.to_numpy())
+
+
+def calibration_splits(frame: pd.DataFrame, horizon: int):
+    """Keep calibration chronological, purged, and inside the outer train set."""
+    splits = [(train, valid) for train, valid in walk_forward_splits(frame, horizon, folds=3)
+              if frame.iloc[train].target.nunique() == 2 and frame.iloc[valid].target.nunique() == 2]
+    if len(splits) < 2:
+        raise ValueError("Need two chronological calibration folds with both outcome classes; import more history")
+    return splits
 
 
 def expected_calibration_error(labels: np.ndarray, probabilities: np.ndarray, bins: int = 10) -> float:
@@ -72,9 +80,11 @@ def main() -> None:
 
     raw_hash = hashlib.sha256(args.csv.read_bytes()).hexdigest()
     features = build_features(pd.read_csv(args.csv))
-    grouped = features.groupby(["symbol", "session_date"], sort=False)
+    grouped = features.groupby(["symbol", "session_date", "segment_id"], sort=False)
+    features["label_end"] = grouped["timestamp"].shift(-args.horizon_bars)
     features["future_return"] = grouped["close"].shift(-args.horizon_bars) / features["close"] - 1
-    features["target"] = (features["future_return"] * 10_000 > args.round_trip_cost_bps).astype(int)
+    # probabilityUp is direction probability, not probability of clearing fees.
+    features["target"] = (features["future_return"] > 0).astype(int)
     data = features.dropna(subset=FEATURE_ORDER + ["future_return"]).copy()
     data = data.replace([np.inf, -np.inf], np.nan).dropna(subset=FEATURE_ORDER)
     if data["symbol"].nunique() < 2:
@@ -95,7 +105,7 @@ def main() -> None:
             continue
         base_classifier = LGBMClassifier(n_estimators=180, max_depth=4, num_leaves=15, learning_rate=0.035,
                                          reg_lambda=2.0, min_child_samples=30, verbosity=-1, n_jobs=2, random_state=17)
-        champion = CalibratedClassifierCV(estimator=base_classifier, method="sigmoid", cv=3)
+        champion = CalibratedClassifierCV(estimator=base_classifier, method="sigmoid", cv=calibration_splits(data.iloc[train_ix], args.horizon_bars))
         regressor = LGBMRegressor(n_estimators=180, max_depth=4, num_leaves=15, learning_rate=0.035,
                                   reg_lambda=2.0, min_child_samples=30, verbosity=-1, n_jobs=2, random_state=17)
         challenger = make_pipeline(StandardScaler(), LogisticRegression(C=0.1, max_iter=1000, class_weight="balanced"))
@@ -136,7 +146,7 @@ def main() -> None:
 
     base_classifier = LGBMClassifier(n_estimators=180, max_depth=4, num_leaves=15, learning_rate=0.035,
                                      reg_lambda=2.0, min_child_samples=30, verbosity=-1, n_jobs=2, random_state=17)
-    champion = CalibratedClassifierCV(estimator=base_classifier, method="sigmoid", cv=5)
+    champion = CalibratedClassifierCV(estimator=base_classifier, method="sigmoid", cv=calibration_splits(data, args.horizon_bars))
     regressor = LGBMRegressor(n_estimators=180, max_depth=4, num_leaves=15, learning_rate=0.035,
                               reg_lambda=2.0, min_child_samples=30, verbosity=-1, n_jobs=2, random_state=17)
     champion.fit(x, y)

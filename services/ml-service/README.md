@@ -69,3 +69,20 @@ The inference API accepts `POST /internal/ml/predict` with a complete feature
 map and `source: "POINT_IN_TIME_FEATURES"`. It is internal to the application
 network. `/internal/ml/model/status` reports whether an approved model is
 mounted. `/health` includes the model state. Do not expose these routes publicly.
+
+## Verification and model semantics
+
+Run `python -m unittest discover -s services/ml-service/tests -v` after installing
+`requirements.txt` and `httpx`. CI now requires these tests, TypeScript checks,
+and the frontend/API build before publishing images. Synthetic test fixtures
+are isolated from application data and never promoted or deployed as models.
+
+Feature windows and labels stop at missing minutes and session boundaries.
+Both outer validation and inner probability calibration are chronological;
+training labels must end before the next validation window. `probabilityUp`
+means a positive forward return. Costs are separately reported assumptions.
+The prediction interval adds validation residual quantiles to the predicted
+return. This is an empirical interval, not a guaranteed confidence bound.
+Inference verifies approval and artifact SHA-256 before loading the model,
+rejects future or timezone-free input timestamps, and retains the data's
+as-of timestamp. Artifact and manifest storage must remain operator-controlled.
