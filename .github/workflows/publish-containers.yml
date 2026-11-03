@@ -29,6 +29,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      - run: node --test apps/api/tests/*.test.mjs
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
