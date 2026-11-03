@@ -51,8 +51,3 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-      - name: Make the published image public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PACKAGE: ragatrade-${{ matrix.image }}
-        run: gh api --method PATCH "/user/packages/container/${PACKAGE}/visibility" -f visibility=public
