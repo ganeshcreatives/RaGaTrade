@@ -9,7 +9,19 @@ const money = (n: number | null | undefined) => n == null || !Number.isFinite(Nu
 const pct = (n: number | null | undefined) => n == null || !Number.isFinite(Number(n)) ? "—" : `${n > 0 ? "+" : ""}${n.toFixed(2)}%`;
 const indiaDateTime = (date: Date) => new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(date).replace("T", " ");
 const nav = [["Overview", LayoutDashboard], ["Markets", TrendingUp], ["Watchlist", Star], ["Paper portfolio", BriefcaseBusiness], ["Price alerts", BellRing], ["Backtesting", ChartNoAxesCombined], ["AI research", Sparkles], ["Global events", Globe2], ["Broker setup", Wifi]] as const;
-async function api(path: string, init: RequestInit = {}) { const r = await fetch(`${API}${path}`, { ...init, signal: init.signal ?? AbortSignal.timeout(path.endsWith("/history/import") ? 120000 : 30000), credentials: "include", headers: { "Content-Type": "application/json", ...(init.headers ?? {}) } }); const data = r.status === 204 ? null : await r.json().catch(() => null); if (!r.ok) throw new Error(data?.error ?? `Request failed (${r.status})`); return data; }
+async function api(path: string, init: RequestInit = {}) {
+  let response: Response;
+  try {
+    response = await fetch(`${API}${path}`, { ...init, signal: init.signal ?? AbortSignal.timeout(path.endsWith("/history/import") ? 120000 : 90000), credentials: "include", headers: { "Content-Type": "application/json", ...(init.headers ?? {}) } });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "TimeoutError") throw new Error("The API is taking longer than expected to start. Please retry in a moment.");
+    if (error instanceof TypeError) throw new Error("The API could not be reached. Check the connection and retry.");
+    throw error;
+  }
+  const data = response.status === 204 ? null : await response.json().catch(() => null);
+  if (!response.ok) throw new Error(data?.error ?? `Request failed (${response.status})`);
+  return data;
+}
 
 export default function App() {
   const [tab, setTab] = useState("Overview"), [user, setUser] = useState<User | null>(null), [authMode, setAuthMode] = useState<"login" | "register" | null>(null);
@@ -20,7 +32,15 @@ export default function App() {
   const [historyDays,setHistoryDays]=useState(30),[historySync,setHistorySync]=useState(false),[historyMsg,setHistoryMsg]=useState("");
   const [previewMode,setPreviewMode]=useState(false);
 
-  const loadBase = useCallback(async () => { const [ov, ins, ev] = await Promise.all([api("/api/v1/overview"), api("/api/v1/instruments"), api("/api/v1/global/events")]); setOverview(ov); setInstruments(ins); setEvents(ev); }, []);
+  const loadBase = useCallback(async () => {
+    const [overviewResult, instrumentsResult, eventsResult] = await Promise.allSettled([api("/api/v1/overview"), api("/api/v1/instruments"), api("/api/v1/global/events")]);
+    if (overviewResult.status === "fulfilled") setOverview(overviewResult.value);
+    if (instrumentsResult.status === "fulfilled") setInstruments(instrumentsResult.value);
+    if (eventsResult.status === "fulfilled") setEvents(eventsResult.value);
+    const coreFailures = [overviewResult, instrumentsResult].filter(result => result.status === "rejected");
+    if (coreFailures.length === 2) throw (overviewResult.status === "rejected" ? overviewResult.reason : new Error("Market data could not load"));
+    if (eventsResult.status === "rejected") setEvents([]);
+  }, []);
   const loadPrivate = useCallback(async () => { if (!user) { setAccount(null); setWatchlist([]); return; } const [a, w, l, p] = await Promise.all([api("/api/v1/paper/account"), api("/api/v1/watchlist"), api("/api/v1/paper/ledger"), api("/api/v1/risk/policy")]); setAccount(a); setWatchlist(w); setLedger(l); setPolicy(p); }, [user]);
   useEffect(() => {
     let active = true;
