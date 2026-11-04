@@ -1,6 +1,10 @@
 import pg from 'pg';
 import {createCipheriv,createDecipheriv,randomBytes} from 'node:crypto';
 const {Pool}=pg;
+export class DhanTokenRejected extends Error {
+ readonly code: string;
+ constructor(code:string,message:string){super(message);this.name='DhanTokenRejected';this.code=code;}
+}
 export function tokenExpiry(value: unknown): Date {
  const text=String(value??'');
  const date=new Date(/[zZ]|[+-]\d{2}:?\d{2}$/.test(text)?text:`${text}+05:30`);
@@ -16,7 +20,7 @@ export function encodeToken(token:string){
 export async function renewDhanWebToken(token:string,clientId:string){
  const response=await fetch('https://api.dhan.co/v2/RenewToken',{method:'GET',headers:{'access-token':token,dhanClientId:clientId,accept:'application/json'},signal:AbortSignal.timeout(15000)});
  const data:any=await response.json().catch(()=>({}));
- if(!response.ok)throw new Error(`Dhan renewal rejected (${response.status})${data.errorCode?` [${String(data.errorCode).slice(0,32)}]`:''}: ${String(data.errorMessage??'Use an active token generated from Dhan Web.').slice(0,180)}`);
+ if(!response.ok)throw new DhanTokenRejected(String(data.errorCode??response.status).slice(0,32),String(data.errorMessage??'Dhan rejected this token. Generate a fresh access token from Dhan Web and try again.').slice(0,180));
  if(typeof data.accessToken!=='string'||!data.accessToken||String(data.dhanClientId)!==clientId)throw new Error('Invalid Dhan renewal response');
  return {token:data.accessToken,expiry:tokenExpiry(data.expiryTime)};
 }
