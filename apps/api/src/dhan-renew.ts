@@ -14,9 +14,9 @@ export function encodeToken(token:string){
  return {encrypted:Buffer.concat([cipher.update(token,'utf8'),cipher.final()]).toString('base64'),iv:iv.toString('base64'),tag:cipher.getAuthTag().toString('base64')};
 }
 export async function renewDhanWebToken(token:string,clientId:string){
- const response=await fetch('https://api.dhan.co/v2/RenewToken',{headers:{'access-token':token,dhanClientId:clientId},signal:AbortSignal.timeout(15000)});
- if(!response.ok)throw new Error(`Dhan renewal rejected (${response.status}). Use an active token generated from Dhan Web.`);
- const data:any=await response.json();
+ const response=await fetch('https://api.dhan.co/v2/RenewToken',{method:'GET',headers:{'access-token':token,dhanClientId:clientId,accept:'application/json'},signal:AbortSignal.timeout(15000)});
+ const data:any=await response.json().catch(()=>({}));
+ if(!response.ok)throw new Error(`Dhan renewal rejected (${response.status})${data.errorCode?` [${String(data.errorCode).slice(0,32)}]`:''}: ${String(data.errorMessage??'Use an active token generated from Dhan Web.').slice(0,180)}`);
  if(typeof data.accessToken!=='string'||!data.accessToken||String(data.dhanClientId)!==clientId)throw new Error('Invalid Dhan renewal response');
  return {token:data.accessToken,expiry:tokenExpiry(data.expiryTime)};
 }

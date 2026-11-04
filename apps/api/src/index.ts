@@ -18,6 +18,7 @@ import { z } from "zod";
 
 const { Pool } = pg;
 const app = express();
+app.set("trust proxy", 2);
 const port = Number(process.env.PORT ?? 4000);
 const jwtSecret = process.env.JWT_SECRET ?? "local-development-only-change-this-before-deploying";
 if(process.env.NODE_ENV==="production"&&(jwtSecret==="local-development-only-change-this-before-deploying"||jwtSecret.startsWith("replace-with")||jwtSecret.length<32))throw new Error("Set a non-placeholder JWT_SECRET of at least 32 characters in production");
