@@ -1,4 +1,4 @@
-import {DhanTokenRejected,encodeToken,renewDhanWebToken} from "./dhan-renew.js";
+import {DhanTokenRejected,encodeToken,renewDhanWebToken,verifyDhanWebToken} from "./dhan-renew.js";
 import { syncNseMaster } from "./instrument-master.js";
 import dotenv from "dotenv";
 dotenv.config({ path: process.env.ENV_FILE ?? "../../.env" });
@@ -125,9 +125,9 @@ app.post("/api/v1/dhan/web-token",auth,dhanTokenLimiter,async(req:AuthedRequest,
  const parsed=z.object({accessToken:z.string().min(40).max(12000)}).safeParse(req.body);
  if(!parsed.success)return res.status(400).json({error:"Enter an active access token generated from Dhan Web"});
  if(!dhanClientId)return res.status(503).json({error:"Dhan client ID is not configured"});
- const result=await renewDhanWebToken(parsed.data.accessToken.trim(),dhanClientId),encoded=encodeToken(result.token);
- await pool.query("INSERT INTO dhan_connections(user_id,client_id,encrypted_access_token,token_iv,token_tag,expires_at,last_verified_at,token_origin,last_renewed_at) VALUES($1,$2,$3,$4,$5,$6,now(),'WEB',now()) ON CONFLICT(user_id) DO UPDATE SET client_id=excluded.client_id,encrypted_access_token=excluded.encrypted_access_token,token_iv=excluded.token_iv,token_tag=excluded.token_tag,expires_at=excluded.expires_at,token_origin='WEB',last_renewed_at=now(),renewal_error=NULL,last_verified_at=now()",[req.userId,dhanClientId,encoded.encrypted,encoded.iv,encoded.tag,result.expiry]);
- await audit(req.userId!,"dhan.web_token_connected",randomUUID());res.json({connected:true,autoRenew:true,expiresAt:result.expiry});
+ const token=parsed.data.accessToken.trim(),verified=await verifyDhanWebToken(token,dhanClientId),encoded=encodeToken(token);
+ await pool.query("INSERT INTO dhan_connections(user_id,client_id,encrypted_access_token,token_iv,token_tag,expires_at,last_verified_at,token_origin,last_renewed_at) VALUES($1,$2,$3,$4,$5,$6,now(),'WEB',now()) ON CONFLICT(user_id) DO UPDATE SET client_id=excluded.client_id,encrypted_access_token=excluded.encrypted_access_token,token_iv=excluded.token_iv,token_tag=excluded.token_tag,expires_at=excluded.expires_at,token_origin='WEB',last_renewed_at=now(),renewal_error=NULL,last_verified_at=now()",[req.userId,dhanClientId,encoded.encrypted,encoded.iv,encoded.tag,verified.expiry]);
+ await audit(req.userId!,"dhan.web_token_connected",randomUUID());res.json({connected:true,autoRenew:true,expiresAt:verified.expiry});
  }catch(e){if(e instanceof DhanTokenRejected)return res.status(400).json({error:e.message,code:e.code});next(e);}});
 app.get("/api/v1/dhan/config",(_req,res)=>res.json({redirectUri:dhanRedirectUri}));
 app.get("/api/v1/dhan/status",auth,async(req:AuthedRequest,res,next)=>{try{const r=await pool.query("SELECT client_id,expires_at,connected_at,last_verified_at,token_origin,last_renewed_at,renewal_error FROM dhan_connections WHERE user_id=$1",[req.userId]),row=r.rows[0];res.json({configured:Boolean(dhanKey&&dhanSecret&&dhanClientId),connected:Boolean(row&&(!row.expires_at||new Date(row.expires_at).getTime()>Date.now())),clientId:row?.client_id,tokenOrigin:row?.token_origin,autoRenew:row?.token_origin==="WEB",lastRenewedAt:row?.last_renewed_at,renewalError:row?.renewal_error,expiresAt:row?.expires_at,connectedAt:row?.connected_at,lastVerifiedAt:row?.last_verified_at,loginEmail:process.env.DHAN_LOGIN_EMAIL??"",redirectUri:dhanRedirectUri});}catch(e){next(e);}});

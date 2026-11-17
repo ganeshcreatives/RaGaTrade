@@ -11,6 +11,21 @@ export function tokenExpiry(value: unknown): Date {
  if(!Number.isFinite(date.getTime())||date.getTime()<=Date.now())throw new Error('Dhan did not provide a valid token expiry');
  return date;
 }
+export function expiryFromAccessToken(token:string):Date {
+ const part=token.split('.')[1];
+ if(!part)throw new Error('Dhan returned an invalid access token');
+ let claims:any;
+ try{claims=JSON.parse(Buffer.from(part,'base64url').toString('utf8'));}catch{throw new Error('Dhan returned an invalid access token');}
+ if(typeof claims.exp!=='number')throw new Error('Dhan access token does not include an expiry');
+ return tokenExpiry(new Date(claims.exp*1000).toISOString());
+}
+export async function verifyDhanWebToken(token:string,clientId:string){
+ const response=await fetch('https://api.dhan.co/v2/profile',{headers:{'access-token':token,accept:'application/json'},signal:AbortSignal.timeout(15000)});
+ const profile:any=await response.json().catch(()=>({}));
+ if(!response.ok)throw new DhanTokenRejected(String(profile.errorCode??response.status).slice(0,32),String(profile.errorMessage??'Dhan rejected this access token. Generate a fresh token from Dhan Web and try again.').slice(0,180));
+ if(String(profile.dhanClientId??profile.clientId??'')!==clientId)throw new DhanTokenRejected('CLIENT_MISMATCH','The Dhan token belongs to a different client account.');
+ return {expiry:expiryFromAccessToken(token),profile};
+}
 export function encodeToken(token:string){
  const key=process.env.DHAN_TOKEN_ENCRYPTION_KEY??'';
  if(!/^[a-f0-9]{64}$/i.test(key))throw new Error('Token encryption not configured');
@@ -21,8 +36,11 @@ export async function renewDhanWebToken(token:string,clientId:string){
  const response=await fetch('https://api.dhan.co/v2/RenewToken',{method:'GET',headers:{'access-token':token,dhanClientId:clientId,accept:'application/json'},signal:AbortSignal.timeout(15000)});
  const data:any=await response.json().catch(()=>({}));
  if(!response.ok)throw new DhanTokenRejected(String(data.errorCode??response.status).slice(0,32),String(data.errorMessage??'Dhan rejected this token. Generate a fresh access token from Dhan Web and try again.').slice(0,180));
- if(typeof data.accessToken!=='string'||!data.accessToken||String(data.dhanClientId)!==clientId)throw new Error('Invalid Dhan renewal response');
- return {token:data.accessToken,expiry:tokenExpiry(data.expiryTime)};
+ if(typeof data.accessToken!=='string'||!data.accessToken)throw new Error('Dhan returned an invalid renewal response');
+ if(data.dhanClientId!=null&&String(data.dhanClientId)!==clientId)throw new DhanTokenRejected('CLIENT_MISMATCH','Dhan renewed a token for a different client account.');
+ const verified=await verifyDhanWebToken(data.accessToken,clientId);
+ const expiry=data.expiryTime?tokenExpiry(data.expiryTime):verified.expiry;
+ return {token:data.accessToken,expiry};
 }
 export async function renewConnections(){
  const pool=new Pool({connectionString:process.env.DATABASE_URL});let failed=0,renewed=0;

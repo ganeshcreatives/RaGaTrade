@@ -8,8 +8,10 @@ probability.
 
 ## Model workflow
 
-1. Sign in to the app, connect Dhan, and use **AI research → Import licensed
-   Dhan history** for at least two supported instruments. Each import is
+1. Sign in to the app, connect Dhan, and open **AI research** for a supported
+   equity. The app automatically syncs missing or stale one-minute history;
+   **Sync selected equity now** remains available for a manual refresh. For
+   at least two supported instruments, collect enough history before training. Each import is
    restricted to 90 days and stored in `market_bars_1m`; Dhan entitlement and
    exchange terms control retention and analysis rights. Export the selected
    window with **Download stored bars**. Never train on today's reconstructed
