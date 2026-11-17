@@ -28,14 +28,13 @@ const historyLimiter=rateLimit({windowMs:60*60*1000,limit:12,standardHeaders:tru
 const redisClient=process.env.REDIS_URL?createClient({url:process.env.REDIS_URL}):null;
 redisClient?.on("error",()=>{});
 if(redisClient)void redisClient.connect().catch(()=>{});
-const inMemoryQuotes=new Map<string,{price:number;change:number;timestamp:string;source:"DHAN_API"}>();
+const inMemoryQuotes=new Map<string,{price:number;change:number|null;netChange:number|null;averagePrice:number|null;volume:number|null;timestamp:string;source:"DHAN_API"}>();
 const pool = new Pool({ connectionString: process.env.DATABASE_URL ?? "postgresql://trading:trading@localhost:5432/trading" });
 const googleClientId=process.env.GOOGLE_CLIENT_ID??"";
 const googleClientSecret=process.env.GOOGLE_CLIENT_SECRET??"";
 const googleRedirectUri=process.env.GOOGLE_REDIRECT_URI??"http://localhost:4000/api/v1/auth/google/callback";
 const googleClient=googleClientId&&googleClientSecret?new OAuth2Client(googleClientId,googleClientSecret,googleRedirectUri):null;
 const dhanKey=process.env.DHAN_API_KEY??"",dhanSecret=process.env.DHAN_API_SECRET??"",dhanClientId=process.env.DHAN_CLIENT_ID??"",dhanRedirectUri=process.env.DHAN_REDIRECT_URI??"http://localhost:4000/api/v1/dhan/callback",dhanEncryptionKey=process.env.DHAN_TOKEN_ENCRYPTION_KEY??"";
-const dhanScrips:Record<string,string>={RELIANCE:"2885",HDFCBANK:"1333",TCS:"11536",ICICIBANK:"4963",INFY:"1594",TMPV:"3456",BHARTIARTL:"10604",LT:"11483",SUNPHARMA:"3351"};
 function encryptDhanToken(token:string){if(!/^[a-f0-9]{64}$/i.test(dhanEncryptionKey))throw new Error("DHAN_TOKEN_ENCRYPTION_KEY must be a 32-byte hex key");const iv=randomBytes(12),cipher=createCipheriv("aes-256-gcm",Buffer.from(dhanEncryptionKey,"hex"),iv),encrypted=Buffer.concat([cipher.update(token,"utf8"),cipher.final()]);return{encrypted:encrypted.toString("base64"),iv:iv.toString("base64"),tag:cipher.getAuthTag().toString("base64")};}
 function decryptDhanToken(row:any){const decipher=createDecipheriv("aes-256-gcm",Buffer.from(dhanEncryptionKey,"hex"),Buffer.from(row.token_iv,"base64"));decipher.setAuthTag(Buffer.from(row.token_tag,"base64"));return Buffer.concat([decipher.update(Buffer.from(row.encrypted_access_token,"base64")),decipher.final()]).toString("utf8");}
 const instruments:any[] = [];
@@ -126,8 +125,10 @@ app.get("/api/v1/overview",async(_req,res)=>{const quotes=await Promise.all(inst
 app.get("/api/v1/instruments",async(req,res)=>{const q=String(req.query.q??"").toLowerCase(),sector=String(req.query.sector??"");const found=instruments.filter(i=>(!q||`${i.symbol} ${i.name} ${i.sector}`.toLowerCase().includes(q))&&(!sector||i.sector===sector));res.json(await Promise.all(found.map(withLatestQuote)));});
 app.get("/api/v1/market/:id/candles",async(req,res,next)=>{try{const i=instruments.find(x=>x.id===req.params.id);if(!i)return res.status(404).json({error:"Instrument not found"});const actual=await pool.query("SELECT event_time,open,high,low,close,volume FROM market_bars_1m WHERE instrument_id=$1 AND source='DHAN_HISTORICAL' AND quality_status='VALID' ORDER BY event_time DESC LIMIT 78",[i.id]);if(actual.rowCount){const candles=actual.rows.reverse().map(b=>({time:new Date(b.event_time).toISOString(),open:Number(b.open),high:Number(b.high),low:Number(b.low),close:Number(b.close),volume:Number(b.volume)}));return res.json({instrument:i,candles,source:"DHAN_HISTORICAL",asOf:candles.at(-1)?.time});}res.json({instrument:i,candles:[],source:"UNAVAILABLE",reason:"No verified historical bars are stored for this instrument. Import Dhan history after connecting your account."});}catch(e){next(e);}});
 app.post("/api/v1/market/:id/history/import",auth,historyLimiter,async(req:AuthedRequest,res,next)=>{try{
-  const instrument=instruments.find(x=>x.id===req.params.id&&x.kind!=="index"),securityId=instrument?dhanScrips[instrument.symbol]:undefined;
-  if(!instrument||!securityId)return res.status(404).json({error:"Historical Dhan mapping is not available for this instrument"});
+  const instrument=instruments.find(x=>x.id===req.params.id&&x.kind!=="index");
+  if(!instrument)return res.status(404).json({error:"Historical Dhan mapping is not available for this instrument"});
+  const mapping=await pool.query("SELECT security_id,exchange_segment FROM dhan_instruments WHERE instrument_id=$1",[instrument.id]),securityId=mapping.rows[0]?.security_id,exchangeSegment=mapping.rows[0]?.exchange_segment;
+  if(!securityId||exchangeSegment!=="NSE_EQ")return res.status(404).json({error:"Historical Dhan mapping is not available for this instrument"});
   const body=z.object({fromDate:z.string().regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/),toDate:z.string().regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)}).safeParse(req.body);
   if(!body.success)return res.status(400).json({error:"Use fromDate and toDate in YYYY-MM-DD HH:mm:ss format (India time)"});
   const parseIst=(v:string)=>new Date(`${v.replace(" ","T")}+05:30`),from=parseIst(body.data.fromDate),to=parseIst(body.data.toDate),range=to.getTime()-from.getTime();
@@ -137,7 +138,7 @@ app.post("/api/v1/market/:id/history/import",auth,historyLimiter,async(req:Authe
   if(!connection.rowCount)return res.status(409).json({error:"Connect your Dhan account before importing historical data"});
   if(connection.rows[0].expires_at&&new Date(connection.rows[0].expires_at).getTime()<=Date.now())return res.status(409).json({error:"The Dhan access token expired. Reconnect Dhan before importing data."});
   const token=decryptDhanToken(connection.rows[0]);
-  const response=await fetch("https://api.dhan.co/v2/charts/intraday",{method:"POST",headers:{"Content-Type":"application/json",accept:"application/json","access-token":token},body:JSON.stringify({securityId,exchangeSegment:"NSE_EQ",instrument:"EQUITY",interval:"1",oi:false,fromDate:body.data.fromDate,toDate:body.data.toDate}),signal:AbortSignal.timeout(30000)});
+  const response=await fetch("https://api.dhan.co/v2/charts/intraday",{method:"POST",headers:{"Content-Type":"application/json",accept:"application/json","access-token":token},body:JSON.stringify({securityId,exchangeSegment,instrument:"EQUITY",interval:"1",oi:false,fromDate:body.data.fromDate,toDate:body.data.toDate}),signal:AbortSignal.timeout(30000)});
   const data:any=await response.json().catch(()=>({}));
   if(!response.ok)return res.status(response.status===401?409:502).json({error:response.status===401?"Dhan rejected the access token. Reconnect and try again.":"Dhan historical data request failed",providerStatus:response.status,providerMessage:String(data?.message??data?.error??"No provider detail").slice(0,300)});
   const arrays=[data.open,data.high,data.low,data.close,data.volume,data.timestamp],count=Array.isArray(data.timestamp)?data.timestamp.length:-1;
@@ -178,7 +179,7 @@ app.get("/api/v1/watchlist",auth,async(req:AuthedRequest,res,next)=>{try{const r
 app.post("/api/v1/watchlist/:instrumentId",auth,async(req:AuthedRequest,res,next)=>{try{if(!instruments.some(i=>i.id===req.params.instrumentId&&i.kind!=="index"))return res.status(404).json({error:"Instrument not found"});await pool.query("INSERT INTO watchlist_items(user_id,instrument_id) VALUES($1,$2) ON CONFLICT DO NOTHING",[req.userId,req.params.instrumentId]);await audit(req.userId!,"watchlist.add",randomUUID(),{instrumentId:req.params.instrumentId});res.status(201).json({ok:true});}catch(e){next(e);}});
 app.delete("/api/v1/watchlist/:instrumentId",auth,async(req:AuthedRequest,res,next)=>{try{await pool.query("DELETE FROM watchlist_items WHERE user_id=$1 AND instrument_id=$2",[req.userId,req.params.instrumentId]);res.status(204).end();}catch(e){next(e);}});
 function quote(id:string){return instruments.find(i=>i.id===id)??null;}
-async function withLatestQuote(i:any){try{let live=inMemoryQuotes.get(i.symbol);if(redisClient?.isReady){const raw=await redisClient.get(`quote:${i.symbol}`);if(raw)live=JSON.parse(raw);}if(live&&Date.now()-Date.parse(live.timestamp)<30000)return{...i,price:Number(live.price),change:Number(live.change??0),asOf:live.timestamp,source:"DHAN_API"};}catch{}return{...i,price:null,change:null,volume:"—",asOf:null,source:"UNAVAILABLE"};}
+async function withLatestQuote(i:any){try{let live=inMemoryQuotes.get(i.symbol);if(redisClient?.isReady){const raw=await redisClient.get(`quote:${i.symbol}`);if(raw)live=JSON.parse(raw);}if(live&&Date.now()-Date.parse(live.timestamp)<30000)return{...i,price:Number(live.price),change:live.change==null?null:Number(live.change),netChange:live.netChange==null?null:Number(live.netChange),averagePrice:live.averagePrice==null?null:Number(live.averagePrice),volume:live.volume==null?null:Number(live.volume),asOf:live.timestamp,source:"DHAN_API"};}catch{}return{...i,price:null,change:null,netChange:null,averagePrice:null,volume:null,asOf:null,source:"UNAVAILABLE"};}
 let pollingDhan=false;
 const dhanFeedHealth:{lastAttemptAt:string|null;lastSuccessAt:string|null;quotesLoaded:number;diagnostic:string}={lastAttemptAt:null,lastSuccessAt:null,quotesLoaded:0,diagnostic:"Dhan quote poll has not run yet."};
 async function pollDhanQuotes(){
@@ -187,11 +188,11 @@ async function pollDhanQuotes(){
   dhanFeedHealth.lastAttemptAt=new Date().toISOString();
   const connection=await pool.query("SELECT * FROM dhan_connections WHERE expires_at>now() ORDER BY connected_at DESC LIMIT 1");
   if(!connection.rowCount){dhanFeedHealth.quotesLoaded=0;dhanFeedHealth.diagnostic="No unexpired Dhan access token is connected. Sign in and reconnect Dhan.";return;}
-  const token=decryptDhanToken(connection.rows[0]),symbols=instruments.filter(i=>dhanScrips[i.symbol]);
+  const token=decryptDhanToken(connection.rows[0]),instrumentById=new Map(instruments.map(i=>[i.id,i] as const)),mapping=await pool.query("SELECT instrument_id,security_id,exchange_segment FROM dhan_instruments WHERE exchange_segment='NSE_EQ' AND instrument_id=ANY($1::text[])",[instruments.map(i=>i.id)]),symbols=mapping.rows.map(row=>({instrument:instrumentById.get(row.instrument_id),securityId:String(row.security_id)})).filter((row):row is {instrument:typeof instruments[number];securityId:string}=>Boolean(row.instrument));
   let quotesLoaded=0;
   for(let offset=0;offset<symbols.length;offset+=1000){
    const batch=symbols.slice(offset,offset+1000);
-   const response=await fetch("https://api.dhan.co/v2/marketfeed/ohlc",{method:"POST",headers:{"access-token":token,"client-id":dhanClientId,"Content-Type":"application/json"},body:JSON.stringify({NSE_EQ:batch.map(i=>Number(dhanScrips[i.symbol]))}),signal:AbortSignal.timeout(10000)});
+   const response=await fetch("https://api.dhan.co/v2/marketfeed/quote",{method:"POST",headers:{"access-token":token,"client-id":dhanClientId,"Content-Type":"application/json"},body:JSON.stringify({NSE_EQ:batch.map(i=>Number(i.securityId))}),signal:AbortSignal.timeout(10000)});
    if(!response.ok){
     const body:any=await response.json().catch(()=>({}));
     const code=String(body.errorCode??response.status).replace(/[^A-Za-z0-9_-]/g,"").slice(0,32);
@@ -200,10 +201,10 @@ async function pollDhanQuotes(){
     return;
    }
    const body:any=await response.json().catch(()=>({}));
-   for(const i of batch){
-    const q=body?.data?.NSE_EQ?.[dhanScrips[i.symbol]],price=Number(q?.last_price),previous=Number(q?.ohlc?.close);
+   for(const entry of batch){
+    const i=entry.instrument,q=body?.data?.NSE_EQ?.[entry.securityId],price=Number(q?.last_price),previous=Number(q?.ohlc?.close),quotedChange=Number(q?.net_change),netChange=Number.isFinite(quotedChange)?quotedChange:price>0&&previous>0?price-previous:null;
     if(!Number.isFinite(price)||price<=0)continue;
-    const snapshot={price,change:previous>0?(price-previous)/previous*100:0,timestamp:new Date().toISOString(),source:"DHAN_API" as const};
+    const averagePrice=Number(q?.average_price),volume=Number(q?.volume),snapshot={price,change:previous>0&&netChange!=null?netChange/previous*100:null,netChange,averagePrice:Number.isFinite(averagePrice)&&averagePrice>0?averagePrice:null,volume:Number.isFinite(volume)&&volume>=0?volume:null,timestamp:new Date().toISOString(),source:"DHAN_API" as const};
     inMemoryQuotes.set(i.symbol,snapshot);
     quotesLoaded++;
     if(redisClient?.isReady)await redisClient.set(`quote:${i.symbol}`,JSON.stringify(snapshot),{EX:30});
@@ -223,8 +224,6 @@ async function pollDhanQuotes(){
 async function loadInstrumentCatalogue(){
  const stored=await pool.query("SELECT i.id,i.symbol,i.name,i.exchange,i.sector,d.security_id FROM instruments i JOIN dhan_instruments d ON d.instrument_id=i.id WHERE i.active=true AND d.exchange_segment='NSE_EQ' ORDER BY i.symbol");
  instruments.splice(0,instruments.length,...stored.rows.map(r=>({id:r.id,symbol:r.symbol,name:r.name,exchange:r.exchange,sector:r.sector,kind:"equity",securityId:r.security_id})));
- for(const key of Object.keys(dhanScrips))delete dhanScrips[key];
- for(const row of stored.rows)dhanScrips[row.symbol]=row.security_id;
 }
 async function refreshInstrumentCatalogue(){try{const count=await syncNseMaster(pool);console.log(`Dhan NSE equity catalogue synced: ${count}`);}catch(error){console.warn("Instrument sync failed; trying the last verified catalogue:",(error as Error).message);}await loadInstrumentCatalogue();}
 

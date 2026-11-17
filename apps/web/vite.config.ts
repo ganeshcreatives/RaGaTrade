@@ -6,8 +6,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": { target: process.env.API_PROXY_TARGET ?? "http://localhost:4000", changeOrigin: false },
-      "/health": { target: process.env.API_PROXY_TARGET ?? "http://localhost:4000", changeOrigin: false },
+      "/api": { target: process.env.API_PROXY_TARGET ?? "http://localhost:4000", changeOrigin: true },
+      "/health": { target: process.env.API_PROXY_TARGET ?? "http://localhost:4000", changeOrigin: true },
     },
   },
   define: { "import.meta.env.VITE_API_URL": JSON.stringify(process.env.VITE_API_URL ?? "") },
