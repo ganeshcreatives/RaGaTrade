@@ -15,6 +15,7 @@ export async function syncNseMaster(pool: Pool) {
     if (row.SEM_EXM_EXCH_ID !== 'NSE' || row.SEM_SEGMENT !== 'E' || row.SEM_INSTRUMENT_NAME !== 'EQUITY' || row.SEM_SERIES !== 'EQ') continue;
     const securityId = String(row.SEM_SMST_SECURITY_ID), symbol = String(row.SEM_TRADING_SYMBOL);
     if (!/^\d+$/.test(securityId) || !/^[A-Z][A-Z0-9&.-]{0,24}$/.test(symbol) || seen.has(symbol)) continue;
+    if (symbol.includes('NSETEST')) continue;
     seen.add(symbol);
     const old = bySymbol.get(symbol);
     rows.push({id:old?.id ?? `nse-${securityId}`,symbol,name:row.SEM_CUSTOM_SYMBOL || symbol,sector:old?.sector || 'Unclassified',security_id:securityId});

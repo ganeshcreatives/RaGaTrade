@@ -3,23 +3,23 @@
 ```mermaid
 flowchart TB
   Browser[React + TypeScript] -->|HTTP + HttpOnly session| API[Express API / BFF]
-  API -->|Transactions, schemas, audit| DB[(PostgreSQL)]
-  API -->|Fresh Dhan quote or UNAVAILABLE| Redis[(Redis · optional cache)]
-  Worker[Market worker · local demo fixture] -. not used for UI or model .-> Redis
-  API -->|OAuth + read-only quote polling| Dhan[DhanHQ Data API]
-  API -->|Prediction request| ML[FastAPI baseline model]
-  Browser -->|Public and authenticated REST| API
-  API -->|Pre-trade risk and paper OMS| OMS[Paper order service]
-  OMS --> DB
-  API -. Live routes hard-disabled .-> Live[Broker order execution]
+  API --> DB[(PostgreSQL)]
+  API -->|Verified Dhan quotes only| Cache[(Redis optional cache)]
+  API -->|Instrument master, quotes, history, consent| Dhan[DhanHQ]
+  API -->|Research request| ML[FastAPI / LightGBM]
+  API -->|Deterministic risk checks| Paper[Paper OMS]
+  Paper --> DB
+  API -. Live order routes hard-disabled .-> Live[No live broker adapter]
 ```
 
-The browser never has database, Redis, model or broker credentials. Local email/password identity is persisted in Postgres; passwords use bcrypt hashes and sessions use signed HttpOnly cookies. Every account, watchlist, paper fill, ledger update and audit entry is scoped to the authenticated user. Paper order state updates are transactionally applied with row locks.
+The browser has no database, Redis, model, Dhan API key/secret, or token-encryption key. Passwords are bcrypt hashed; app sessions are signed HttpOnly cookies. Dhan API credentials and the token-encryption key are held in Azure Key Vault; a user's active access token is encrypted before it is stored in PostgreSQL. The token renewal job uses a managed identity and only renews active Web-generated Dhan tokens.
 
-The local market worker still writes demo fixtures to dedicated Redis keys, but the API no longer reads those keys as quote fallbacks. The UI displays verified Dhan quotes only; missing or expired quotes are `UNAVAILABLE`. Charts are empty until verified Dhan historical bars are imported. The Dhan integration polls a mapped NSE equity set after a user completes OAuth consent; the API key/secret alone do not create the required access token. No index, news, or global event provider is connected, so those panels remain empty/unavailable. The ML service has a CPU LightGBM training and inference workflow, versioned candidate manifests, hash checks, purged chronological validation, logistic/momentum comparisons, and a manual promotion gate. It refuses to score synthetic or quote-only inputs; without a separately licensed point-in-time bar dataset and a human-approved artifact, its result is `NO_TRADE` with no fabricated probability. See `services/ml-service/README.md`.
+The API loads the official Dhan NSE equity instrument master before listening. Quotes are retrieved from Dhan in batches within the Quote API limit and cached only when Dhan returns valid data. Missing feeds remain `UNAVAILABLE`; there is no synthetic quote publisher or fallback. Index data and verified event/news sources are not connected. Historical bars are persisted only after Dhan history import.
 
-The API owns deterministic paper risk checks. It checks current equity against the loss stop, position count, total deployment, available cash and sellable position before a fill. Live routes return a hard failure and have no broker adapter. The `trading-worker` process remains isolated and paper-only; no LLM or model can place orders. One-minute bar, feed-gap, feature-snapshot, model-version/evaluation, source, and event-entity tables are included for the next point-in-time ingestion and model governance steps.
+The ML service has CPU-based feature, LightGBM, baseline comparison, chronological purge, metric, artifact-hash and approval code. No approved production model is installed; the current candidate failed validation. It returns `NO_TRADE` without valid data and approval. The paper OMS checks cash, positions, loss and exposure in a database transaction, but its fill and cost assumptions are simplified. Live broker orders have no adapter and remain hard-disabled.
 
-## Deployment boundary
+## Deployment boundary and open gates
 
-Compose builds local containers for all application services. Azure currently hosts the React web app, Express API, internal Python ML service, PostgreSQL Flexible Server, Key Vault and Log Analytics. Resource identifiers, ingress and network settings, budget alerts, and operator navigation are recorded in the gitignored `AZURE_ACCOUNT_REFERENCE.md`. The database connection and secret references are configured, with one public firewall allowlist entry for the Container Apps egress IP. Remaining architecture work includes Dhan OAuth consent and data imports, an approved trained artifact, licensed news/index sources, durable model artifact storage, backups/restore validation, alerting/observability, identity enhancements, and external legal/regulatory review. Live order execution remains disabled.
+Azure hosts the web client, API, ML service, PostgreSQL Flexible Server, Key Vault and Log Analytics. Resource IDs, revisions, network configuration, budget, and portal navigation live in the private Git-ignored `AZURE_ACCOUNT_REFERENCE.md`.
+
+The deployed app currently has an active verified Dhan Web token and receives read-only NSE quotes. Full production readiness still requires licensed public-data rights, a public index/news/event provider, systematic import of history under Dhan terms, a passing and approved model, stronger paper OMS replay/fill realism, durable model registry and training pipeline, backups/restore drill, alerting, load/security acceptance, identity hardening, and legal/regulatory review. Do not present this release as ready for unattended or live trading.

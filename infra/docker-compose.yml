@@ -63,18 +63,5 @@ services:
     ports: ["8000:8000"]
     volumes:
       - ../models:/models:ro
-  market-worker:
-    build:
-      context: ..
-      dockerfile: infra/docker/market.Dockerfile
-    environment:
-      REDIS_URL: redis://redis:6379
-    depends_on:
-      redis: { condition: service_healthy }
-  trading-worker:
-    build:
-      context: ..
-      dockerfile: infra/docker/trading.Dockerfile
-    restart: unless-stopped
 volumes:
   pgdata:

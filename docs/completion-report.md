@@ -88,3 +88,16 @@ Remaining work includes: user must choose whether to replace OAuth by supplying 
 - The Dhan connection/access-token step is pending. The user was asked whether to issue a new Web token and replace the OAuth connection; do not create or rotate it without that action-time approval. Keep all token values out of chat and logs.
 - Verification: `npm run typecheck`, `npm run build`, and four API renewal unit tests passed locally. The local ML unittest command could not import `numpy`; GitHub Actions for commit `0dce984` completed the configured verify and API/web/ML image-publish jobs successfully.
 - Production readiness remains incomplete: no active Dhan token or live quotes, no point-in-time licensed model dataset, no approved model (candidate failed its gates), no licensed news/index/global-event sources, no cloud model artifact registry or training schedule, and restore/load/security/compliance acceptance remain outstanding. Live order execution remains disabled.
+
+## 17 November 2026 follow-up — verified live connection and cleanup
+
+This section supersedes the earlier 17 November status above where it says the Dhan connection is pending or no live quotes are available.
+
+- Signed into the RaGaTrade application, connected a fresh Dhan Web token through the corrected encrypted token endpoint, and verified the account against Dhan Profile. The overview returned a live Reliance quote with `DHAN_API` provenance.
+- The deployed API reported 2,760 catalogue entries, of which 2,756 had live Dhan quotes and four were unavailable (the index and Dhan test scripts). The source now filters `NSETEST` instruments, does not seed an index or sample equities, and the overview includes every equity rather than skipping its first entry. Verify counts again after publishing this revision.
+- Removed the unused Redis demo market worker and placeholder trading worker from the local Compose stack and repository. The API now serves historical chart, export, and backtest rows only when their source is verified Dhan history; legacy non-Dhan bars are rejected from use.
+- Automatic incremental history sync is described in the UI and runs when a signed-in user opens AI Research for an equity with missing or stale candles. History import still depends on Dhan's account limits and data-use rights.
+- Checks on this source revision: TypeScript typechecks and API/web production builds passed; 7 API token tests and 8 ML research tests passed. Python emits a Starlette/httpx deprecation warning and NumPy timedelta deprecation warnings; these do not fail tests.
+- The current real-data LightGBM candidate did not pass the evaluation gate, so forecasts stay unavailable/`NO_TRADE`. No fabricated values or model outputs are substituted.
+
+Remaining gates include observing an actual scheduled token rotation, licensing rights for any redistribution, index/news/event providers, full-history coverage, a passing reviewed model, durable model registry/training, operational restore/load/security acceptance, and legal/regulatory review. Live trading remains disabled. Do not describe this build as production-ready for unattended or live trading.
