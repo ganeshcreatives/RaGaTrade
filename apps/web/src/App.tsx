@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Activity, ArrowDownRight, ArrowUpRight, Bell, BellRing, BookOpen, BriefcaseBusiness, ChevronDown, CircleHelp, Globe2, LayoutDashboard, LogOut, Menu, MoreHorizontal, Plus, Search, ShieldCheck, Sparkles, Star, TrendingUp, Wallet, Wifi, X, RefreshCw, SlidersHorizontal, ChartNoAxesCombined } from "lucide-react";
 
 const API = (import.meta as any).env.VITE_API_URL ?? "";
+const isLocalPreview = ["localhost", "127.0.0.1"].includes(window.location.hostname);
 const LazyPriceChart = lazy(() => import("./PriceChart"));
 type Instrument = { id: string; symbol: string; name: string; exchange: string; sector: string; price: number | null; change: number | null; netChange?: number | null; averagePrice?: number | null; volume: number | null; kind: string; source?: string; asOf?: string };
 type User = { id: string; email: string; name: string; role: string };
@@ -48,7 +49,7 @@ export default function App() {
     void loadBase().then(() => { if (active) setPreviewMode(false); }).catch(() => {
       if (!active) return;
       setPreviewMode(true);
-      setNotice("Market data could not load. Use Refresh to retry; Azure may be waking up.");
+      setNotice(isLocalPreview ? "Local API and PostgreSQL are not running. Start the Docker Compose stack from the project README." : "Market data could not load. Use Refresh to retry; Azure may be waking up.");
     }).finally(() => { if (active) setBooting(false); });
     void api("/api/v1/auth/me").then(session => { if (active) setUser(session.user); }).catch(() => {});
     return () => { active = false; };
