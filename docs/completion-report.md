@@ -1,14 +1,13 @@
 # RaGaTrade implementation and verification report
 
-Date: 3 November 2026 (India time)
+Date: 17 November 2026 (India time)
 Reference: `ai_trading_architecture.html`. This is an implementation inventory, not a production readiness certificate.
 
 ## Overall result
 
-The development application is deployed, but the full architecture is **not complete**.
-The live Dhan connection requires the user's consent session to finish. A paid Data API
-plan and app key/secret do not replace that step. No real training dataset or reviewed
-model artifact has been installed. Missing data remains unavailable; models return NO_TRADE.
+The development application is deployed and the Dhan read-only connection is verified,
+but the full architecture is **not complete**. No reviewed production model artifact has
+been installed. Missing licensed data remains unavailable; models return NO_TRADE.
 
 ## Architecture coverage
 
@@ -17,9 +16,9 @@ model artifact has been installed. Missing data remains unavailable; models retu
 | Frontend | React dashboard, instruments, watchlist, paper portfolio, alerts, research, broker setup | Comprehensive browser/mobile/accessibility acceptance testing remains |
 | Identity | Email/password login, hashed passwords, server sessions, user-scoped routes; Google adapter | Email verification, password recovery, MFA and Google provider configuration are not complete |
 | Backend/data | Express, PostgreSQL schema, persisted accounts/orders/ledger/audit; request validation | Migration tooling, broad contract coverage and stronger operational controls remain |
-| Dhan connection | Server consent generation/exchange, encrypted token storage, disconnect/profile routes; server callback configuration | User must finish consent; root redirect compatibility added after observing Dhan return to the homepage |
-| Market quotes | Read-only polling for nine mapped NSE equities, unavailable-state handling | Full instrument master, Dhan WebSocket worker, order-book depth, exchange timestamps and licensed index data are not implemented |
-| History | Dhan one-minute import with OHLCV validation, database persistence, CSV export | Real imports still depend on Dhan connection; corporate actions, exchange calendar, historical gap reconciliation and archive pipeline remain |
+| Dhan connection | Verified Dhan Web token stored encrypted; profile verification, hourly renewal job, read-only polling | Verify scheduled token rotation at runtime; renewal can fail on revocation or outage |
+| Market quotes | Official NSE EQ instrument master and read-only quote polling; 2,756 of 2,756 catalogued equities returned live Dhan quotes at verification | No Dhan WebSocket, order-book depth, exchange timestamps or licensed index feed |
+| History | Dhan one-minute import with OHLCV validation, database persistence, CSV export and incremental sync when AI Research opens | Corporate-action adjustment, exchange calendar, gap reconciliation and archive pipeline remain |
 | Feature engine | Returns, volatility, relative volume, rolling VWAP, range and momentum | Optional cross-market/event fields have no providers; missing fields are neutral placeholders, not observations |
 | Model training | LightGBM direction classifier/return regressor, chronological purged evaluation and calibration, logistic/momentum comparisons | No real candidate trained; XGBoost challenger, multi-horizon registry, shadow comparison and drift monitoring remain |
 | Model inference | Approval/hash checks, data-age and timestamp guards, empirical return intervals, NO_TRADE without model | No approved active artifact; inference has not been validated with a real trained model |
@@ -94,10 +93,11 @@ Remaining work includes: user must choose whether to replace OAuth by supplying 
 This section supersedes the earlier 17 November status above where it says the Dhan connection is pending or no live quotes are available.
 
 - Signed into the RaGaTrade application, connected a fresh Dhan Web token through the corrected encrypted token endpoint, and verified the account against Dhan Profile. The overview returned a live Reliance quote with `DHAN_API` provenance.
-- The deployed API reported 2,760 catalogue entries, of which 2,756 had live Dhan quotes and four were unavailable (the index and Dhan test scripts). The source now filters `NSETEST` instruments, does not seed an index or sample equities, and the overview includes every equity rather than skipping its first entry. Verify counts again after publishing this revision.
+- The deployed API initially reported 2,760 entries, of which 2,756 had live Dhan quotes and four were unavailable (the index and Dhan test scripts). After the filter and overview fix were deployed, the live endpoint reported 2,756 entries, all 2,756 with `DHAN_API` source, zero unavailable or synthetic-source rows, and no index/test symbols. The overview quote count also reported 2,756.
 - Removed the unused Redis demo market worker and placeholder trading worker from the local Compose stack and repository. The API now serves historical chart, export, and backtest rows only when their source is verified Dhan history; legacy non-Dhan bars are rejected from use.
 - Automatic incremental history sync is described in the UI and runs when a signed-in user opens AI Research for an equity with missing or stale candles. History import still depends on Dhan's account limits and data-use rights.
 - Checks on this source revision: TypeScript typechecks and API/web production builds passed; 7 API token tests and 8 ML research tests passed. Python emits a Starlette/httpx deprecation warning and NumPy timedelta deprecation warnings; these do not fail tests.
+- Commit `6fc1e32c82f5cd638b31e484f91e87f1df923878` passed the GitHub Actions verification and API/web/ML image builds. Azure now runs API revision `api--0000014` and web revision `web--0000009`; `/health` reports `ok` with PostgreSQL connected. Live feed status was `LIVE`, and Reliance was sourced from `DHAN_API`.
 - The current real-data LightGBM candidate did not pass the evaluation gate, so forecasts stay unavailable/`NO_TRADE`. No fabricated values or model outputs are substituted.
 
 Remaining gates include observing an actual scheduled token rotation, licensing rights for any redistribution, index/news/event providers, full-history coverage, a passing reviewed model, durable model registry/training, operational restore/load/security acceptance, and legal/regulatory review. Live trading remains disabled. Do not describe this build as production-ready for unattended or live trading.
