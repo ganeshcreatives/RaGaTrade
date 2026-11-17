@@ -133,7 +133,7 @@ app.get("/api/v1/dhan/config",(_req,res)=>res.json({redirectUri:dhanRedirectUri}
 app.get("/api/v1/dhan/status",auth,async(req:AuthedRequest,res,next)=>{try{const r=await pool.query("SELECT client_id,expires_at,connected_at,last_verified_at,token_origin,last_renewed_at,renewal_error FROM dhan_connections WHERE user_id=$1",[req.userId]),row=r.rows[0];res.json({configured:Boolean(dhanKey&&dhanSecret&&dhanClientId),connected:Boolean(row&&(!row.expires_at||new Date(row.expires_at).getTime()>Date.now())),clientId:row?.client_id,tokenOrigin:row?.token_origin,autoRenew:row?.token_origin==="WEB",lastRenewedAt:row?.last_renewed_at,renewalError:row?.renewal_error,expiresAt:row?.expires_at,connectedAt:row?.connected_at,lastVerifiedAt:row?.last_verified_at,loginEmail:process.env.DHAN_LOGIN_EMAIL??"",redirectUri:dhanRedirectUri});}catch(e){next(e);}});
 app.get("/api/v1/dhan/profile",auth,async(req:AuthedRequest,res,next)=>{try{const r=await pool.query("SELECT * FROM dhan_connections WHERE user_id=$1",[req.userId]);if(!r.rowCount)return res.status(404).json({error:"Dhan is not connected"});const token=decryptDhanToken(r.rows[0]),response=await fetch("https://api.dhan.co/v2/profile",{headers:{"access-token":token,"client-id":dhanClientId,accept:"application/json"}}),profile:any=await response.json().catch(()=>({}));if(!response.ok)throw new Error(profile.message??`Dhan profile check failed (${response.status})`);await pool.query("UPDATE dhan_connections SET last_verified_at=now() WHERE user_id=$1",[req.userId]);res.json({clientId:profile.dhanClientId??profile.clientId,name:profile.dhanClientName??profile.name,verified:true});}catch(e){next(e);}});
 app.post("/api/v1/dhan/disconnect",auth,async(req:AuthedRequest,res,next)=>{try{await pool.query("DELETE FROM dhan_connections WHERE user_id=$1",[req.userId]);await audit(req.userId!,"dhan.disconnected",randomUUID());res.status(204).end();}catch(e){next(e);}});
-app.get("/api/v1/overview",async(_req,res)=>{const quotes=await Promise.all(instruments.slice(1).map(withLatestQuote));const live=quotes.some(q=>q.source==="DHAN_API");res.json({market:{name:"NIFTY 50",value:null,change:null,asOf:null,source:"UNAVAILABLE",reason:"The current Dhan integration maps supported NSE equities only; no index feed is connected."},breadth:null,feed:{status:live?"LIVE":"OFFLINE",label:live?"Dhan quotes · supported NSE equities":"No live Dhan quote is available. Connect Dhan to load real prices."},events:[],instruments:quotes});});
+app.get("/api/v1/overview",async(_req,res)=>{const quotes=await Promise.all(instruments.slice(1).map(withLatestQuote));const live=quotes.some(q=>q.source==="DHAN_API");res.json({market:{name:"NIFTY 50",value:null,change:null,asOf:null,source:"UNAVAILABLE",reason:"The current Dhan integration maps supported NSE equities only; no index feed is connected."},breadth:null,feed:{status:live?"LIVE":"OFFLINE",label:live?"Dhan quotes · supported NSE equities":"No live Dhan quote is available.",quoteCount:live?quotes.filter(q=>q.source==="DHAN_API").length:0,lastAttemptAt:dhanFeedHealth.lastAttemptAt,lastSuccessAt:dhanFeedHealth.lastSuccessAt,diagnostic:dhanFeedHealth.diagnostic},events:[],instruments:quotes});});
 app.get("/api/v1/instruments",async(req,res)=>{const q=String(req.query.q??"").toLowerCase(),sector=String(req.query.sector??"");const found=instruments.filter(i=>(!q||`${i.symbol} ${i.name} ${i.sector}`.toLowerCase().includes(q))&&(!sector||i.sector===sector));res.json(await Promise.all(found.map(withLatestQuote)));});
 app.get("/api/v1/market/:id/candles",async(req,res,next)=>{try{const i=instruments.find(x=>x.id===req.params.id);if(!i)return res.status(404).json({error:"Instrument not found"});const actual=await pool.query("SELECT event_time,open,high,low,close,volume,source FROM market_bars_1m WHERE instrument_id=$1 AND quality_status='VALID' ORDER BY event_time DESC LIMIT 78",[i.id]);if(actual.rowCount){const candles=actual.rows.reverse().map(b=>({time:new Date(b.event_time).toISOString(),open:Number(b.open),high:Number(b.high),low:Number(b.low),close:Number(b.close),volume:Number(b.volume)}));return res.json({instrument:i,candles,source:actual.rows.every((b:any)=>b.source==='DHAN_HISTORICAL')?"DHAN_HISTORICAL":"MIXED",asOf:candles.at(-1)?.time});}res.json({instrument:i,candles:[],source:"UNAVAILABLE",reason:"No verified historical bars are stored for this instrument. Import Dhan history after connecting your account."});}catch(e){next(e);}});
 app.post("/api/v1/market/:id/history/import",auth,historyLimiter,async(req:AuthedRequest,res,next)=>{try{
@@ -191,27 +191,45 @@ app.delete("/api/v1/watchlist/:instrumentId",auth,async(req:AuthedRequest,res,ne
 function quote(id:string){return instruments.find(i=>i.id===id)??null;}
 async function withLatestQuote(i:any){try{let live=inMemoryQuotes.get(i.symbol);if(redisClient?.isReady){const raw=await redisClient.get(`quote:${i.symbol}`);if(raw)live=JSON.parse(raw);}if(live&&Date.now()-Date.parse(live.timestamp)<30000)return{...i,price:Number(live.price),change:Number(live.change??0),asOf:live.timestamp,source:"DHAN_API"};}catch{}return{...i,price:null,change:null,volume:"—",asOf:null,source:"UNAVAILABLE"};}
 let pollingDhan=false;
+const dhanFeedHealth:{lastAttemptAt:string|null;lastSuccessAt:string|null;quotesLoaded:number;diagnostic:string}={lastAttemptAt:null,lastSuccessAt:null,quotesLoaded:0,diagnostic:"Dhan quote poll has not run yet."};
 async function pollDhanQuotes(){
  if(pollingDhan)return; pollingDhan=true;
  try{
+  dhanFeedHealth.lastAttemptAt=new Date().toISOString();
   const connection=await pool.query("SELECT * FROM dhan_connections WHERE expires_at>now() ORDER BY connected_at DESC LIMIT 1");
-  if(!connection.rowCount)return;
+  if(!connection.rowCount){dhanFeedHealth.quotesLoaded=0;dhanFeedHealth.diagnostic="No unexpired Dhan access token is connected. Sign in and reconnect Dhan.";return;}
   const token=decryptDhanToken(connection.rows[0]),symbols=instruments.filter(i=>dhanScrips[i.symbol]);
+  let quotesLoaded=0;
   for(let offset=0;offset<symbols.length;offset+=1000){
    const batch=symbols.slice(offset,offset+1000);
    const response=await fetch("https://api.dhan.co/v2/marketfeed/ohlc",{method:"POST",headers:{"access-token":token,"client-id":dhanClientId,"Content-Type":"application/json"},body:JSON.stringify({NSE_EQ:batch.map(i=>Number(dhanScrips[i.symbol]))}),signal:AbortSignal.timeout(10000)});
-   if(!response.ok)break;
-   const body:any=await response.json();
+   if(!response.ok){
+    const body:any=await response.json().catch(()=>({}));
+    const code=String(body.errorCode??response.status).replace(/[^A-Za-z0-9_-]/g,"").slice(0,32);
+    dhanFeedHealth.quotesLoaded=0;
+    dhanFeedHealth.diagnostic=response.status===401||response.status===403?`Dhan rejected the access token (${code}). Reconnect Dhan or enter a fresh active Dhan Web token.`:`Dhan quote request failed (${code}).`;
+    return;
+   }
+   const body:any=await response.json().catch(()=>({}));
    for(const i of batch){
     const q=body?.data?.NSE_EQ?.[dhanScrips[i.symbol]],price=Number(q?.last_price),previous=Number(q?.ohlc?.close);
     if(!Number.isFinite(price)||price<=0)continue;
     const snapshot={price,change:previous>0?(price-previous)/previous*100:0,timestamp:new Date().toISOString(),source:"DHAN_API" as const};
     inMemoryQuotes.set(i.symbol,snapshot);
+    quotesLoaded++;
     if(redisClient?.isReady)await redisClient.set(`quote:${i.symbol}`,JSON.stringify(snapshot),{EX:30});
    }
    if(offset+1000<symbols.length)await new Promise(resolve=>setTimeout(resolve,1100));
   }
- }catch(error){console.warn("Dhan quote poll failed:",(error as Error).message);}finally{pollingDhan=false;}
+  dhanFeedHealth.quotesLoaded=quotesLoaded;
+  if(quotesLoaded){dhanFeedHealth.lastSuccessAt=new Date().toISOString();dhanFeedHealth.diagnostic=`${quotesLoaded} live Dhan quotes received.`;}
+  else dhanFeedHealth.diagnostic="Dhan returned no usable quotes. Check market hours, token validity, and Data API access.";
+ }catch(error){
+  const name=error instanceof Error?error.name:"Error";
+  dhanFeedHealth.quotesLoaded=0;
+  dhanFeedHealth.diagnostic=name==="TimeoutError"?"Dhan quote request timed out. It will retry automatically.":"Dhan quote service is temporarily unreachable. It will retry automatically.";
+  console.warn("Dhan quote poll failed:",name);
+ }finally{pollingDhan=false;}
 }
 async function loadInstrumentCatalogue(){
  const stored=await pool.query("SELECT i.id,i.symbol,i.name,i.exchange,i.sector,d.security_id FROM instruments i JOIN dhan_instruments d ON d.instrument_id=i.id WHERE i.active=true AND d.exchange_segment='NSE_EQ' ORDER BY i.symbol");
@@ -245,6 +263,6 @@ app.use(express.static(webDistPath,{index:false,immutable:true,maxAge:"1y",setHe
 app.get("*",(req,res,next)=>{if(req.path.startsWith("/api/"))return next();res.sendFile(path.join(webDistPath,"index.html"),error=>{if(error)next(error);});});
 app.use((err:unknown,_req:Request,res:Response,_next:NextFunction)=>{console.error(err);res.status(500).json({error:"Internal server error"});});
 let server:ReturnType<typeof app.listen>|undefined;
-void initialize().then(async()=>{await loadInstrumentCatalogue();void refreshInstrumentCatalogue();setInterval(()=>void refreshInstrumentCatalogue(),24*60*60*1000).unref();server=app.listen(port,()=>console.log(`API ready on http://localhost:${port}; Postgres connected; paper mode`));setInterval(()=>void pollDhanQuotes(),5000).unref();}).catch(error=>{console.error("Database initialization failed",error);process.exit(1);});
+void initialize().then(async()=>{await loadInstrumentCatalogue();void refreshInstrumentCatalogue();setInterval(()=>void refreshInstrumentCatalogue(),24*60*60*1000).unref();server=app.listen(port,()=>console.log(`API ready on http://localhost:${port}; Postgres connected; paper mode`));void pollDhanQuotes();setInterval(()=>void pollDhanQuotes(),5000).unref();}).catch(error=>{console.error("Database initialization failed",error);process.exit(1);});
 process.on("SIGTERM",()=>{server?.close();void pool.end();void redisClient?.quit().catch(()=>{});});
 
