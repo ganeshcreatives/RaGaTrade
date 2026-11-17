@@ -8,14 +8,17 @@ probability.
 
 ## Model workflow
 
-1. Sign in to the app, connect Dhan, and open **AI research** for a supported
-   equity. The app automatically syncs missing or stale one-minute history;
-   **Sync selected equity now** remains available for a manual refresh. For
-   at least two supported instruments, collect enough history before training. Each import is
-   restricted to 90 days and stored in `market_bars_1m`; Dhan entitlement and
-   exchange terms control retention and analysis rights. Export the selected
-   window with **Download stored bars**. Never train on today's reconstructed
-   history as if it had been available at the time.
+1. Sign in to the app, connect Dhan, and open **AI research**. **Queue all NSE
+   equities** creates a resumable server-side job for every active, mapped NSE
+   equity; the worker requests one symbol at a time, retries transient errors,
+   and shows completed, failed, queued, and current-symbol progress. A job can
+   cover 1–90 calendar days; the UI defaults to 30 days. **Sync selected equity**
+   remains available for a one-symbol refresh. The Dhan intraday API permits up
+   to 90 days per request and documents Data API limits of 5 requests/second and
+   100,000/day. History is stored in `market_bars_1m`; Dhan entitlement and
+   exchange terms control retention and analysis rights. The queue only imports
+   real bars: it does not train, approve, or activate a model. Never train on
+   today's reconstructed history as if it had been available at the time.
 2. Include at least two symbols and 600 usable rows after the rolling warmup.
    Optional point-in-time columns are `market_return_5`, `sector_return_5`,
    `usd_inr_change`, `brent_change`, `sentiment_score`, and `event_confidence`.

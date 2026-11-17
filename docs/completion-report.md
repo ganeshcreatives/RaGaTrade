@@ -101,3 +101,10 @@ This section supersedes the earlier 17 November status above where it says the D
 - The current real-data LightGBM candidate did not pass the evaluation gate, so forecasts stay unavailable/`NO_TRADE`. No fabricated values or model outputs are substituted.
 
 Remaining gates include observing an actual scheduled token rotation, licensing rights for any redistribution, index/news/event providers, full-history coverage, a passing reviewed model, durable model registry/training, operational restore/load/security acceptance, and legal/regulatory review. Live trading remains disabled. Do not describe this build as production-ready for unattended or live trading.
+
+## 17 November 2026 follow-up — full-universe history queue
+
+- Added a user-scoped background job to queue real Dhan one-minute history for every active mapped NSE equity. It is opt-in from AI Research, accepts 1–90 calendar days (30 by default), records per-symbol outcomes in PostgreSQL, retries transient errors, resumes stale in-progress work after restart, and reports total/completed/failed/pending/current-symbol progress.
+- A PostgreSQL advisory lock prevents duplicate queue workers across API replicas. The worker handles one request at a time at a conservative cadence below Dhan's published 5 requests/second and 100,000 Data API requests/day limits. Dhan allows up to 90 days per intraday history request. A full catalogue download may take many minutes and consume substantial database storage.
+- This queues history only. It does not create a model, score every stock, or approve a candidate. The currently installed production state still has no approved model because the last real-data candidate failed evaluation. The scorer continues to suppress forecasts until a real candidate passes independent validation and named human approval.
+- Verification on this source tree: API/web typechecks and production build passed; 7 API tests and 8 ML tests passed; `git diff --check` passed. The API integration path still needs a live Azure job run and Dhan batch response verification before claiming successful full-catalogue coverage.

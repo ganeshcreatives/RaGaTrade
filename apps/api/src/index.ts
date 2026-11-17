@@ -1,5 +1,6 @@
 import {DhanTokenRejected,encodeToken,renewDhanWebToken,verifyDhanWebToken} from "./dhan-renew.js";
 import { syncNseMaster } from "./instrument-master.js";
+import { importDhanHistory } from "./research-history.js";
 import dotenv from "dotenv";
 dotenv.config({ path: process.env.ENV_FILE ?? "../../.env" });
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -25,6 +26,7 @@ if(process.env.NODE_ENV==="production"&&(jwtSecret==="local-development-only-cha
 const authLimiter=rateLimit({windowMs:15*60*1000,limit:12,standardHeaders:true,legacyHeaders:false,message:{error:"Too many sign-in attempts. Try again later."}});
 const dhanTokenLimiter=rateLimit({windowMs:15*60*1000,limit:5,standardHeaders:true,legacyHeaders:false,message:{error:"Too many Dhan token attempts. Try again later."}});
 const historyLimiter=rateLimit({windowMs:60*60*1000,limit:12,standardHeaders:true,legacyHeaders:false,message:{error:"Historical data import limit reached. Try again later."}});
+const historyBatchLimiter=rateLimit({windowMs:60*60*1000,limit:2,standardHeaders:true,legacyHeaders:false,message:{error:"Full-catalogue history sync can be started twice per hour."}});
 const redisClient=process.env.REDIS_URL?createClient({url:process.env.REDIS_URL}):null;
 redisClient?.on("error",()=>{});
 if(redisClient)void redisClient.connect().catch(()=>{});
@@ -68,6 +70,10 @@ ALTER TABLE forecasts ALTER COLUMN model_version DROP NOT NULL;
 CREATE TABLE IF NOT EXISTS market_bars_1m(instrument_id text NOT NULL REFERENCES instruments(id),event_time timestamptz NOT NULL,open numeric(18,6) NOT NULL,high numeric(18,6) NOT NULL,low numeric(18,6) NOT NULL,close numeric(18,6) NOT NULL,volume bigint NOT NULL CHECK(volume>=0),source text NOT NULL,ingested_at timestamptz NOT NULL DEFAULT now(),quality_status text NOT NULL DEFAULT 'VALID' CHECK(quality_status IN ('VALID','SUSPECT','REJECTED')),PRIMARY KEY(instrument_id,event_time),CHECK(high>=GREATEST(open,close,low)),CHECK(low<=LEAST(open,close,high)));
 CREATE INDEX IF NOT EXISTS market_bars_1m_time_idx ON market_bars_1m(event_time DESC);
 UPDATE market_bars_1m SET quality_status='REJECTED' WHERE source<>'DHAN_HISTORICAL' AND quality_status='VALID';
+CREATE TABLE IF NOT EXISTS research_history_jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,from_time timestamptz NOT NULL,to_time timestamptz NOT NULL,status text NOT NULL DEFAULT 'QUEUED' CHECK(status IN ('QUEUED','RUNNING','COMPLETED','COMPLETED_WITH_ERRORS','FAILED')),total_items integer NOT NULL DEFAULT 0,completed_items integer NOT NULL DEFAULT 0,failed_items integer NOT NULL DEFAULT 0,created_at timestamptz NOT NULL DEFAULT now(),started_at timestamptz,completed_at timestamptz);
+CREATE INDEX IF NOT EXISTS research_history_jobs_user_idx ON research_history_jobs(user_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS research_history_job_items(job_id uuid NOT NULL REFERENCES research_history_jobs(id) ON DELETE CASCADE,instrument_id text NOT NULL REFERENCES instruments(id),status text NOT NULL DEFAULT 'PENDING' CHECK(status IN ('PENDING','RUNNING','COMPLETED','FAILED')),attempts integer NOT NULL DEFAULT 0,stored_bars integer NOT NULL DEFAULT 0,error text,next_attempt_at timestamptz NOT NULL DEFAULT now(),started_at timestamptz,completed_at timestamptz,updated_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(job_id,instrument_id));
+CREATE INDEX IF NOT EXISTS research_history_job_items_queue_idx ON research_history_job_items(status,next_attempt_at,updated_at);
 CREATE TABLE IF NOT EXISTS feed_gaps(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),instrument_id text NOT NULL REFERENCES instruments(id),gap_start timestamptz NOT NULL,gap_end timestamptz,detected_at timestamptz NOT NULL DEFAULT now(),source text NOT NULL,resolved_at timestamptz,details jsonb NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS feature_snapshots(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),instrument_id text NOT NULL REFERENCES instruments(id),as_of timestamptz NOT NULL,horizon_minutes integer NOT NULL CHECK(horizon_minutes IN (5,15,30)),features jsonb NOT NULL,source text NOT NULL,data_freshness_ms integer NOT NULL CHECK(data_freshness_ms>=0),created_at timestamptz NOT NULL DEFAULT now(),UNIQUE(instrument_id,as_of,horizon_minutes));
 CREATE TABLE IF NOT EXISTS model_versions(model_version text PRIMARY KEY,model_family text NOT NULL,artifact_sha256 text NOT NULL,dataset_sha256 text NOT NULL,training_rows integer NOT NULL,training_started_at timestamptz,training_completed_at timestamptz NOT NULL,metrics jsonb NOT NULL,approval_status text NOT NULL CHECK(approval_status IN ('CANDIDATE','APPROVED','ROLLED_BACK','REJECTED')),reviewer text,approval_note text,created_at timestamptz NOT NULL DEFAULT now());
@@ -148,6 +154,36 @@ app.post("/api/v1/market/:id/history/import",auth,historyLimiter,async(req:Authe
   const client=await pool.connect();let imported=0;try{await client.query("BEGIN");for(let offset=0;offset<rows.length;offset+=500){const batch=rows.slice(offset,offset+500),values:string[]=[],params:any[]=[];for(const row of batch){const base=params.length;params.push(...row);values.push(`($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8})`);}const saved=await client.query(`INSERT INTO market_bars_1m(instrument_id,event_time,open,high,low,close,volume,source) VALUES ${values.join(",")} ON CONFLICT(instrument_id,event_time) DO UPDATE SET open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,volume=excluded.volume,source=excluded.source,ingested_at=now(),quality_status='VALID'`,params);imported+=saved.rowCount??0;}await client.query("COMMIT");}catch(e){await client.query("ROLLBACK");throw e;}finally{client.release();}
   await audit(req.userId!,"market.history.imported",randomUUID(),{instrumentId:instrument.id,fromDate:body.data.fromDate,toDate:body.data.toDate,received:rows.length,imported,rejected,source:"DHAN_HISTORICAL"});
   res.json({instrumentId:instrument.id,symbol:instrument.symbol,fromDate:body.data.fromDate,toDate:body.data.toDate,source:"DHAN_HISTORICAL",received:count,stored:imported,rejected,licensedDataReminder:"Use and retain data only as permitted by your active Dhan/exchange entitlements."});
+}catch(e){next(e);}});
+app.post("/api/v1/research/history-jobs",auth,historyBatchLimiter,async(req:AuthedRequest,res,next)=>{try{
+  if(!instruments.length)return res.status(503).json({error:"The verified NSE equity catalogue is not loaded yet"});
+  if(!dhanKey||!dhanSecret||!dhanClientId||!/^[a-f0-9]{64}$/i.test(dhanEncryptionKey))return res.status(503).json({error:"Dhan server credentials or token encryption are not configured"});
+  const parsed=z.object({days:z.number().int().min(1).max(90).default(30)}).safeParse(req.body??{});
+  if(!parsed.success)return res.status(400).json({error:"Choose a history window from 1 to 90 days"});
+  const connection=await pool.query("SELECT expires_at FROM dhan_connections WHERE user_id=$1",[req.userId]);
+  if(!connection.rowCount)return res.status(409).json({error:"Connect Dhan before syncing the full equity catalogue"});
+  if(connection.rows[0].expires_at&&new Date(connection.rows[0].expires_at).getTime()<=Date.now())return res.status(409).json({error:"The Dhan token expired. Reconnect Dhan before starting a catalogue sync."});
+  const active=await pool.query("SELECT id,status,total_items,completed_items,failed_items FROM research_history_jobs WHERE user_id=$1 AND status IN ('QUEUED','RUNNING') ORDER BY created_at DESC LIMIT 1",[req.userId]);
+  if(active.rowCount)return res.status(200).json({...active.rows[0],alreadyRunning:true,message:"A catalogue history sync is already queued or running."});
+  const now=new Date(),from=new Date(now.getTime()-parsed.data.days*86400000),client=await pool.connect();
+  let jobId="",total=0;
+  try{
+    await client.query("BEGIN");
+    const job=await client.query("INSERT INTO research_history_jobs(user_id,from_time,to_time,status) VALUES($1,$2,$3,'QUEUED') RETURNING id",[req.userId,from,now]);jobId=job.rows[0].id;
+    const queued=await client.query("INSERT INTO research_history_job_items(job_id,instrument_id) SELECT $1,d.instrument_id FROM dhan_instruments d JOIN instruments i ON i.id=d.instrument_id WHERE i.active=true AND d.exchange_segment='NSE_EQ' ON CONFLICT DO NOTHING",[jobId]);
+    total=queued.rowCount??0;
+    if(!total){await client.query("ROLLBACK");return res.status(409).json({error:"No mapped active NSE equities are available for history sync"});}
+    await client.query("UPDATE research_history_jobs SET total_items=$1 WHERE id=$2",[total,jobId]);
+    await client.query("COMMIT");
+  }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
+  await audit(req.userId!,"research.history_catalogue.queued",jobId!,{days:parsed.data.days,totalItems:total,source:"DHAN_HISTORICAL"});
+  res.status(202).json({id:jobId,status:"QUEUED",totalItems:total,completedItems:0,failedItems:0,historyDays:parsed.data.days,message:"Full NSE equity history sync queued. It runs in the background and can be resumed after service restarts."});
+}catch(e){next(e);}});
+app.get("/api/v1/research/history-jobs/current",auth,async(req:AuthedRequest,res,next)=>{try{
+  const job=await pool.query("SELECT id,status,total_items AS \"totalItems\",completed_items AS \"completedItems\",failed_items AS \"failedItems\",created_at AS \"createdAt\",started_at AS \"startedAt\",completed_at AS \"completedAt\",from_time AS \"fromTime\",to_time AS \"toTime\" FROM research_history_jobs WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1",[req.userId]);
+  if(!job.rowCount)return res.json({status:"IDLE",totalItems:0,completedItems:0,failedItems:0});
+  const counts=await pool.query("SELECT count(*) FILTER(WHERE status='PENDING')::int AS pending,count(*) FILTER(WHERE status='RUNNING')::int AS running,count(*) FILTER(WHERE status='COMPLETED')::int AS completed,count(*) FILTER(WHERE status='FAILED')::int AS failed,COALESCE(sum(stored_bars),0)::bigint AS \"storedBars\",(SELECT i.symbol FROM research_history_job_items q JOIN instruments i ON i.id=q.instrument_id WHERE q.job_id=$1 AND q.status='RUNNING' LIMIT 1) AS \"currentSymbol\" FROM research_history_job_items WHERE job_id=$1",[job.rows[0].id]);
+  res.json({...job.rows[0],...counts.rows[0]});
 }catch(e){next(e);}});
 app.get("/api/v1/research/bars/export",auth,historyLimiter,async(req:AuthedRequest,res,next)=>{try{
   const params=z.object({fromDate:z.string().regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/),toDate:z.string().regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)}).safeParse(req.query);
@@ -249,6 +285,39 @@ app.use(express.static(webDistPath,{index:false,immutable:true,maxAge:"1y",setHe
 app.get("*",(req,res,next)=>{if(req.path.startsWith("/api/"))return next();res.sendFile(path.join(webDistPath,"index.html"),error=>{if(error)next(error);});});
 app.use((err:unknown,_req:Request,res:Response,_next:NextFunction)=>{console.error(err);res.status(500).json({error:"Internal server error"});});
 let server:ReturnType<typeof app.listen>|undefined;
-void initialize().then(async()=>{await refreshInstrumentCatalogue();setInterval(()=>void refreshInstrumentCatalogue(),24*60*60*1000).unref();server=app.listen(port,()=>console.log(`API ready on http://localhost:${port}; Postgres connected; paper mode`));void pollDhanQuotes();setInterval(()=>void pollDhanQuotes(),5000).unref();}).catch(error=>{console.error("Database initialization failed",error);process.exit(1);});
+let historyWorkerBusy=false;
+async function processHistoryQueue(){
+ if(historyWorkerBusy)return;historyWorkerBusy=true;let worker:any;
+ try{
+  worker=await pool.connect();
+  const lock=await worker.query("SELECT pg_try_advisory_lock(77423101) AS locked");
+  if(!lock.rows[0]?.locked)return;
+  await worker.query("UPDATE research_history_job_items SET status='PENDING',next_attempt_at=now(),updated_at=now() WHERE status='RUNNING' AND updated_at<now()-interval '3 minutes'");
+  await worker.query("BEGIN");
+  const selected=await worker.query("SELECT q.job_id,q.instrument_id,q.attempts,j.user_id,j.from_time,j.to_time FROM research_history_job_items q JOIN research_history_jobs j ON j.id=q.job_id WHERE q.status='PENDING' AND q.next_attempt_at<=now() AND j.status IN ('QUEUED','RUNNING') ORDER BY j.created_at,q.instrument_id LIMIT 1 FOR UPDATE OF q SKIP LOCKED");
+  if(!selected.rowCount){await worker.query("COMMIT");return;}
+  const task=selected.rows[0],attempts=Number(task.attempts)+1;
+  await worker.query("UPDATE research_history_job_items SET status='RUNNING',attempts=$3,started_at=COALESCE(started_at,now()),updated_at=now(),error=NULL WHERE job_id=$1 AND instrument_id=$2",[task.job_id,task.instrument_id,attempts]);
+  await worker.query("UPDATE research_history_jobs SET status='RUNNING',started_at=COALESCE(started_at,now()) WHERE id=$1",[task.job_id]);
+  await worker.query("COMMIT");
+  try{
+   const con=await pool.query("SELECT encrypted_access_token,token_iv,token_tag,expires_at FROM dhan_connections WHERE user_id=$1",[task.user_id]);
+   if(!con.rowCount||con.rows[0].expires_at&&new Date(con.rows[0].expires_at).getTime()<=Date.now())throw Object.assign(new Error("Dhan connection is missing or expired; reconnect to continue."),{permanent:true});
+   const mapping=await pool.query("SELECT security_id,exchange_segment FROM dhan_instruments WHERE instrument_id=$1",[task.instrument_id]);
+   if(!mapping.rowCount||mapping.rows[0].exchange_segment!=="NSE_EQ")throw Object.assign(new Error("Verified Dhan NSE mapping is unavailable."),{permanent:true});
+   const result=await importDhanHistory(pool,{instrumentId:task.instrument_id,securityId:String(mapping.rows[0].security_id),token:decryptDhanToken(con.rows[0]),from:new Date(task.from_time),to:new Date(task.to_time)});
+   await worker.query("UPDATE research_history_job_items SET status='COMPLETED',stored_bars=$3,completed_at=now(),updated_at=now(),error=NULL WHERE job_id=$1 AND instrument_id=$2",[task.job_id,task.instrument_id,result.stored]);
+  }catch(error){
+   const message=error instanceof Error?error.message:"History import failed",permanent=Boolean((error as any)?.permanent)||[400,401,403,404].includes(Number((error as any)?.status)),failed=permanent||attempts>=3;
+   await worker.query("UPDATE research_history_job_items SET status=$3,error=$4,next_attempt_at=now()+interval '15 seconds',completed_at=CASE WHEN $3='FAILED' THEN now() ELSE NULL END,updated_at=now() WHERE job_id=$1 AND instrument_id=$2",[task.job_id,task.instrument_id,failed?"FAILED":"PENDING",message.slice(0,240)]);
+   if(permanent&&message.includes("Dhan connection"))await worker.query("UPDATE research_history_job_items SET status='FAILED',error=$2,completed_at=now(),updated_at=now() WHERE job_id=$1 AND status='PENDING'",[task.job_id,message.slice(0,240)]);
+  }
+  const counts=await worker.query("SELECT count(*) FILTER(WHERE status='COMPLETED')::int AS completed,count(*) FILTER(WHERE status='FAILED')::int AS failed,count(*) FILTER(WHERE status IN ('PENDING','RUNNING'))::int AS remaining FROM research_history_job_items WHERE job_id=$1",[task.job_id]);
+  const c=counts.rows[0],done=Number(c.remaining)===0;
+  await worker.query("UPDATE research_history_jobs SET completed_items=$2,failed_items=$3,status=CASE WHEN $4 THEN CASE WHEN $3>0 THEN 'COMPLETED_WITH_ERRORS' ELSE 'COMPLETED' END ELSE 'RUNNING' END,completed_at=CASE WHEN $4 THEN now() ELSE NULL END WHERE id=$1",[task.job_id,c.completed,c.failed,done]);
+ }catch(error){console.warn("Dhan history queue worker error:",error instanceof Error?error.message:"Unknown error");}
+ finally{if(worker){try{await worker.query("SELECT pg_advisory_unlock(77423101)");}catch{}worker.release();}historyWorkerBusy=false;}
+}
+void initialize().then(async()=>{await refreshInstrumentCatalogue();setInterval(()=>void refreshInstrumentCatalogue(),24*60*60*1000).unref();server=app.listen(port,()=>console.log(`API ready on http://localhost:${port}; Postgres connected; paper mode`));void pollDhanQuotes();setInterval(()=>void pollDhanQuotes(),5000).unref();setInterval(()=>void processHistoryQueue(),1000).unref();}).catch(error=>{console.error("Database initialization failed",error);process.exit(1);});
 process.on("SIGTERM",()=>{server?.close();void pool.end();void redisClient?.quit().catch(()=>{});});
 
