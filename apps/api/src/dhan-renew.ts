@@ -57,7 +57,13 @@ export async function renewConnections(){
    const result=await renewDhanWebToken(token,row.client_id),encoded=encodeToken(result.token);
    await db.query('UPDATE dhan_connections SET encrypted_access_token=$2,token_iv=$3,token_tag=$4,expires_at=$5,last_renewed_at=now(),renewal_error=NULL WHERE user_id=$1',[row.user_id,encoded.encrypted,encoded.iv,encoded.tag,result.expiry]);
    await db.query('COMMIT');renewed++;
-  }catch{await db.query('ROLLBACK');failed++;await pool.query("UPDATE dhan_connections SET renewal_error='Automatic renewal failed; verify or reconnect Dhan' WHERE user_id=$1",[user.user_id]);}finally{db.release();}
+  }catch(error){
+   await db.query('ROLLBACK');failed++;
+   const detail=error instanceof DhanTokenRejected?`${error.code}: ${error.message}`:error instanceof Error?error.message:'Unknown renewal error';
+   const safeDetail=detail.replace(/\s+/g,' ').slice(0,220);
+   console.warn(`Dhan token renewal failed for ${String(user.user_id).slice(0,8)}: ${safeDetail}`);
+   await pool.query("UPDATE dhan_connections SET renewal_error=$2 WHERE user_id=$1",[user.user_id,`Automatic renewal failed: ${safeDetail}`]);
+  }finally{db.release();}
  }
  console.log(JSON.stringify({renewed,failed}));
  if(failed)process.exitCode=1;
