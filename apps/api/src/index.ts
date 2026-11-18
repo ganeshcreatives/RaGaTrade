@@ -57,10 +57,10 @@ async function syncOfficialEvents(){
    const id=createHash("sha256").update(url).digest("hex");
    await pool.query("INSERT INTO global_events(id,category,title,source,source_url,published_at,impact,sentiment,details,source_status) VALUES($1,'RBI press release',$2,'Reserve Bank of India',$3,$4,'UNASSESSED','UNASSESSED',$5,'VERIFIED') ON CONFLICT(id) DO UPDATE SET title=excluded.title,source_url=excluded.source_url,published_at=excluded.published_at,details=excluded.details,source_status='VERIFIED'",[id,title,url,published,description||"Official Reserve Bank of India press release."]);
   }
-  await pool.query("INSERT INTO event_sources(id,url,status,last_checked_at,last_success_at,last_error,items_loaded) VALUES($1,$2,'CONNECTED',now(),now(),NULL,$3) ON CONFLICT(id) DO UPDATE SET url=excluded.url,status='CONNECTED',last_checked_at=now(),last_success_at=now(),last_error=NULL,items_loaded=excluded.items_loaded",[sourceId,rbiRssUrl,items.length]);
+  await pool.query("INSERT INTO event_sources(id,name,source_type,terms_url,enabled,url,status,last_checked_at,last_success_at,last_error,items_loaded) VALUES($1,'Reserve Bank of India press releases','RSS',$2,true,$2,'CONNECTED',now(),now(),NULL,$3) ON CONFLICT(id) DO UPDATE SET url=excluded.url,status='CONNECTED',last_checked_at=now(),last_success_at=now(),last_error=NULL,items_loaded=excluded.items_loaded,enabled=true",[sourceId,rbiRssUrl,items.length]);
  }catch(error){
   const message=(error instanceof Error?error.message:"Official RSS source unavailable").replace(/\s+/g," ").slice(0,240);
-  await pool.query("INSERT INTO event_sources(id,url,status,last_checked_at,last_error,items_loaded) VALUES($1,$2,'DEGRADED',now(),$3,0) ON CONFLICT(id) DO UPDATE SET url=excluded.url,status='DEGRADED',last_checked_at=now(),last_error=excluded.last_error",[sourceId,rbiRssUrl,message]).catch(()=>{});
+  await pool.query("INSERT INTO event_sources(id,name,source_type,terms_url,enabled,url,status,last_checked_at,last_error,items_loaded) VALUES($1,'Reserve Bank of India press releases','RSS',$2,true,$2,'DEGRADED',now(),$3,0) ON CONFLICT(id) DO UPDATE SET url=excluded.url,status='DEGRADED',last_checked_at=now(),last_error=excluded.last_error,enabled=true",[sourceId,rbiRssUrl,message]).catch(()=>{});
   console.warn("RBI event source sync failed:",message);
  }
 }
@@ -109,7 +109,12 @@ CREATE TABLE IF NOT EXISTS backtest_runs(id uuid PRIMARY KEY DEFAULT gen_random_
 ALTER TABLE backtest_runs ALTER COLUMN source SET DEFAULT 'UNAVAILABLE';
 CREATE TABLE IF NOT EXISTS global_events(id text PRIMARY KEY,category text NOT NULL,title text NOT NULL,source text NOT NULL,published_at timestamptz,first_seen_at timestamptz NOT NULL DEFAULT now(),impact text NOT NULL,sentiment text NOT NULL,details text NOT NULL,source_status text NOT NULL DEFAULT 'UNVERIFIED');
 ALTER TABLE global_events ADD COLUMN IF NOT EXISTS source_url text;
-CREATE TABLE IF NOT EXISTS event_sources(id text PRIMARY KEY,url text NOT NULL,status text NOT NULL,last_checked_at timestamptz,last_success_at timestamptz,last_error text,items_loaded integer NOT NULL DEFAULT 0);
+ALTER TABLE event_sources ADD COLUMN IF NOT EXISTS url text;
+ALTER TABLE event_sources ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'DISCONNECTED';
+ALTER TABLE event_sources ADD COLUMN IF NOT EXISTS last_checked_at timestamptz;
+ALTER TABLE event_sources ADD COLUMN IF NOT EXISTS last_success_at timestamptz;
+ALTER TABLE event_sources ADD COLUMN IF NOT EXISTS last_error text;
+ALTER TABLE event_sources ADD COLUMN IF NOT EXISTS items_loaded integer NOT NULL DEFAULT 0;
 ALTER TABLE global_events ALTER COLUMN source_status SET DEFAULT 'UNVERIFIED';
 CREATE TABLE IF NOT EXISTS event_entities(event_id text NOT NULL REFERENCES global_events(id) ON DELETE CASCADE,entity_type text NOT NULL,entity_key text NOT NULL,confidence numeric(5,4) NOT NULL CHECK(confidence BETWEEN 0 AND 1),PRIMARY KEY(event_id,entity_type,entity_key));
 `;
