@@ -1,0 +1,75 @@
+/* Dhan-inspired market screens: keep dense data readable at normal zoom. */
+.app { font-size: 14px; }
+.sidebar .workspace b,
+.sidebar .side-user b,
+.help-card b { font-size: 12px; }
+.sidebar .workspace small,
+.sidebar .side-user small,
+.help-card p { font-size: 11px; }
+.sidebar .nav-label { font-size: 10px; }
+.sidebar .nav-item { font-size: 13px; }
+.sidebar .help-card button,
+.sidebar .link-btn,
+.sidebar .text-btn { font-size: 11px; }
+.topbar .crumb { font-size: 13px; }
+.topbar .search-global input { font-size: 13px; }
+.topbar .search-global kbd { font-size: 10px; }
+.content .eyebrow,
+.content .card-kicker { font-size: 10px; }
+.content .greeting h1 { font-size: 27px; }
+.content .subtitle { font-size: 13px; line-height: 1.5; }
+.content .data-tag { font-size: 10px; }
+.content .outline-btn,
+.content .buy-btn { font-size: 12px; }
+.content .market-strip,
+.content .strip-title { font-size: 13px; }
+.content .index-card span,
+.content .index-card small { font-size: 11px; }
+.content .index-card b { font-size: 14px; }
+.content .card h3 { font-size: 16px; }
+.content .focus-title { font-size: 16px; }
+.content .price-row strong { font-size: 25px; }
+.content .price-row span { font-size: 12px; }
+.content .chart-meta { font-size: 11px; }
+.content .muted,
+.content .research-method p,
+.content .research-method li,
+.content .events-page p,
+.content .ops-grid p { font-size: 12px; }
+.content .table-head,
+.content .instrument-table-head,
+.content .dhan-market-head { font-size: 10px; }
+.content .stock-row,
+.content .dhan-market-row { font-size: 12px; }
+.content .stock-company b,
+.content .dhan-market-name b { font-size: 12px; }
+.content .stock-company small,
+.content .dhan-market-name small { font-size: 10px; }
+.content .data-table { font-size: 12px; }
+.content .data-table th { font-size: 10px; }
+.content .data-table td { font-size: 12px; }
+.content .inline-empty { font-size: 12px; }
+.content .event-detail h4 { font-size: 15px; }
+.content .event-detail small { font-size: 10px; }
+.content .event-category,
+.content .event-impact { font-size: 10px; }
+.content .status-row,
+.content .risk-line b { font-size: 12px; }
+.content .risk-line small,
+.content .status-row b { font-size: 10px; }
+.content .form-label,
+.content .alert-row b { font-size: 12px; }
+.content input,
+.content select { font-size: 13px; }
+.content .disclaimer,
+.content .source-note { font-size: 10px; line-height: 1.5; }
+.content .risk-card ul,
+.content .source-checklist ul,
+.content .ops-grid ul { font-size: 12px; }
+
+@media (max-width: 760px) {
+  .content .greeting h1 { font-size: 23px; }
+  .content .subtitle { font-size: 12px; }
+  .content .dhan-market-head { font-size: 9px; }
+  .content .price-row strong { font-size: 23px; }
+}

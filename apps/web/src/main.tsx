@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import "./styles.css";
+import "./market-typography.css";
 
 // Dhan apps registered with the site root return here. Forward the one-time
 // code to the server route, where the signed consent cookie is verified.
