@@ -45,11 +45,11 @@ export async function renewDhanWebToken(token:string,clientId:string){
 export async function renewConnections(){
  const pool=new Pool({connectionString:process.env.DATABASE_URL});let failed=0,renewed=0;
  try{
- const users=await pool.query("SELECT user_id FROM dhan_connections WHERE token_origin='WEB' AND expires_at<now()+interval '12 hours' AND expires_at>now()");
+ const users=await pool.query("SELECT user_id FROM dhan_connections WHERE token_origin='WEB' AND expires_at<now()+interval '12 hours' AND expires_at>now() AND (renewal_error IS NULL OR renewal_error NOT LIKE 'Dhan rejected%')");
  for(const user of users.rows){
   const db=await pool.connect();try{
    await db.query('BEGIN');
-   const locked=await db.query("SELECT * FROM dhan_connections WHERE user_id=$1 AND token_origin='WEB' AND expires_at<now()+interval '12 hours' AND expires_at>now() FOR UPDATE SKIP LOCKED",[user.user_id]);
+   const locked=await db.query("SELECT * FROM dhan_connections WHERE user_id=$1 AND token_origin='WEB' AND expires_at<now()+interval '12 hours' AND expires_at>now() AND (renewal_error IS NULL OR renewal_error NOT LIKE 'Dhan rejected%') FOR UPDATE SKIP LOCKED",[user.user_id]);
    if(!locked.rowCount){await db.query('COMMIT');continue;}
    const row=locked.rows[0],cipher=createDecipheriv('aes-256-gcm',Buffer.from(process.env.DHAN_TOKEN_ENCRYPTION_KEY!,'hex'),Buffer.from(row.token_iv,'base64'));
    cipher.setAuthTag(Buffer.from(row.token_tag,'base64'));
@@ -59,10 +59,12 @@ export async function renewConnections(){
    await db.query('COMMIT');renewed++;
   }catch(error){
    await db.query('ROLLBACK');failed++;
+   const rejected=error instanceof DhanTokenRejected&&error.code==='DH-906';
    const detail=error instanceof DhanTokenRejected?`${error.code}: ${error.message}`:error instanceof Error?error.message:'Unknown renewal error';
    const safeDetail=detail.replace(/\s+/g,' ').slice(0,220);
+   const statusMessage=rejected?`Dhan rejected the saved access token (${safeDetail}). Generate a fresh Dhan Web token and save it here.`:`Automatic renewal failed: ${safeDetail}`;
    console.warn(`Dhan token renewal failed for ${String(user.user_id).slice(0,8)}: ${safeDetail}`);
-   await pool.query("UPDATE dhan_connections SET renewal_error=$2 WHERE user_id=$1",[user.user_id,`Automatic renewal failed: ${safeDetail}`]);
+   await pool.query("UPDATE dhan_connections SET renewal_error=$2 WHERE user_id=$1",[user.user_id,statusMessage]);
   }finally{db.release();}
  }
  console.log(JSON.stringify({renewed,failed}));
